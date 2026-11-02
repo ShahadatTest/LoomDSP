@@ -50,11 +50,10 @@ fn colours_share_the_white_stream() {
     let mut noise = Noise::new(RATE);
     noise.tick(Colour::Pink);
     noise.tick(Colour::Brown);
-    let (after_colours, _) = noise.streams();
     let mut plain = Noise::new(RATE);
     plain.tick(Colour::White);
     plain.tick(Colour::White);
-    assert_eq!(after_colours, plain.streams().0);
+    assert_eq!(noise.state, plain.state);
 }
 
 /// The brown memory survives when asked to, so a brown signal does not jump,
@@ -81,10 +80,10 @@ fn copy_brown_leaves_the_streams_alone() {
         source.tick(Colour::Brown);
     }
     let mut copy = Noise::new(RATE);
-    let streams = copy.streams();
+    let streams = (copy.state, copy.aux);
     copy.copy_brown_from(&source);
     assert_eq!(copy.brown, source.brown);
-    assert_eq!(copy.streams(), streams);
+    assert_eq!((copy.state, copy.aux), streams);
 }
 
 /// The value from one step stays from -1 to 1, and a stream never sticks at 0.
@@ -95,5 +94,32 @@ fn white_stays_in_range() {
         let value = next_white(&mut state);
         assert!((-1.0..=1.0).contains(&value));
         assert_ne!(state, 0);
+    }
+}
+
+/// No random stream repeats another at a shifted offset, within or across two
+/// seeds. The two seeds are the ones `loom.osc.noise` gives its stereo channels.
+#[test]
+fn streams_from_two_seeds_do_not_overlap() {
+    let (mut left, mut right) = (Noise::new(RATE), Noise::new(RATE));
+    left.restart(42);
+    right.restart(42 ^ 0x85EB_CA6B);
+    let states = [left.state, left.aux, right.state, right.aux].map(|mut state| {
+        let mut values: Vec<u32> = (0..4_096)
+            .map(|_| {
+                next_white(&mut state);
+                state
+            })
+            .collect();
+        values.sort_unstable();
+        values
+    });
+    for (i, a) in states.iter().enumerate() {
+        for (j, b) in states.iter().enumerate().skip(i + 1) {
+            assert!(
+                !a.iter().any(|x| b.binary_search(x).is_ok()),
+                "streams {i} and {j} overlap"
+            );
+        }
     }
 }

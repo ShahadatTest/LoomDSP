@@ -54,26 +54,22 @@ fn copied_noise_uses_the_channel_in_its_seed() {
     assert_eq!(right, run_copy(1, 512));
 }
 
-/// The two channels do not reuse either random stream at a shifted offset.
+/// The two channels play different noise, in white and in pink. The crate
+/// checks that their streams never overlap.
 #[test]
-fn stereo_noise_streams_do_not_overlap() {
-    let mut left = Noise::new(RATE);
-    let mut right = Noise::new(RATE);
-    left.restart(42);
-    right.channel = 1;
-    right.restart(42);
-    let ((left_white, left_aux), (right_white, right_aux)) = (left.generator.streams(), right.generator.streams());
-    let streams = [left_white, left_aux, right_white, right_aux].map(|mut state| {
-        (0..128)
-            .map(|_| {
-                noise::next_white(&mut state);
-                state
-            })
-            .collect::<std::collections::HashSet<_>>()
-    });
-    for i in 0..streams.len() {
-        for j in i + 1..streams.len() {
-            assert!(streams[i].is_disjoint(&streams[j]), "streams {i} and {j} overlap");
+fn stereo_noise_channels_differ() {
+    for colour in [Colour::White, Colour::Pink] {
+        let mut left = Noise::new(RATE);
+        let mut right = Noise::new(RATE);
+        left.restart(42);
+        right.channel = 1;
+        right.restart(42);
+        for i in 0..128 {
+            assert_ne!(
+                left.generator.tick(colour),
+                right.generator.tick(colour),
+                "{colour:?} frame {i}"
+            );
         }
     }
 }

@@ -1,11 +1,9 @@
 //! Pure DSP algorithms, with no ports, graph, or real-time host (ADR-0035).
 //!
-//! An algorithm is a plain struct that holds state. Usually `tick` processes
-//! one sample and `reset` clears it. Some differ because of what they do:
-//! `DelayLine` has `step_delay` and `step_allpass` for its two uses of one
-//! memory, and `clear`, and `Noise` has `restart`, because it needs a seed.
-//! Coefficients are a separate small type, so the caller decides how often to
-//! compute them.
+//! An algorithm is a plain struct that holds state: `tick` processes one sample
+//! and `reset` clears it. `Noise` has `restart` instead of `reset`, because it
+//! needs a seed. Coefficients are a separate small type, so the caller decides
+//! how often to compute them.
 //!
 //! Each algorithm states the input it accepts. It does not guard against
 //! values outside that range, and it does not smooth parameters: both belong

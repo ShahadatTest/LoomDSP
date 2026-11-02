@@ -8,7 +8,7 @@
 //! nothing here allocates on the audio thread, not even a mode change.
 
 use loom_dsp::filter::dc_blocker::DcBlocker;
-use loom_dsp::limiter::Limiter;
+use loom_dsp::limiter::{self, Limiter};
 
 /// What the safety stage does to the final output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -102,6 +102,7 @@ impl SafetyStage {
             limiter: limiter(sample_rate),
             fade: Fade::new(sample_rate),
         };
+        stage.limiter.set_mode(limiter_mode(mode));
         stage.fade_in();
         stage
     }
@@ -170,7 +171,7 @@ impl SafetyStage {
             self.mode = mode;
         }
         self.dc.iter_mut().for_each(DcBlocker::reset);
-        self.limiter.reset();
+        self.limiter.set_mode(limiter_mode(self.mode));
         self.fade.position = 0;
         self.fade_in();
     }
@@ -193,7 +194,7 @@ impl SafetyStage {
             if self.mode != OutputSafety::Off {
                 a = self.dc[0].tick(a);
                 b = self.dc[1].tick(b);
-                (a, b) = self.limiter.tick(a, b, self.mode == OutputSafety::Clean);
+                (a, b) = self.limiter.tick(a, b);
             }
             let gain = self.fade.tick();
             *l = (a * gain).clamp(-1.0, 1.0);
@@ -204,7 +205,7 @@ impl SafetyStage {
             {
                 self.mode = mode;
                 self.dc.iter_mut().for_each(DcBlocker::reset);
-                self.limiter.reset();
+                self.limiter.set_mode(limiter_mode(mode));
                 self.fade_in();
             }
         }
@@ -228,8 +229,21 @@ fn dc_blocker(sample_rate: f32) -> DcBlocker {
 
 /// The stage's limiter (rule 4).
 fn limiter(sample_rate: f32) -> Limiter {
-    let lookahead = samples(LOOKAHEAD_SECONDS, sample_rate).max(1);
-    Limiter::new(CEILING, lookahead, RELEASE_SECONDS, sample_rate)
+    Limiter::new(limiter::Settings {
+        ceiling: CEILING,
+        lookahead: samples(LOOKAHEAD_SECONDS, sample_rate).max(1),
+        release_seconds: RELEASE_SECONDS,
+        sample_rate,
+    })
+}
+
+/// The limiter's mode for a safety mode. Off does not run the limiter.
+fn limiter_mode(mode: OutputSafety) -> limiter::Mode {
+    if mode == OutputSafety::Clean {
+        limiter::Mode::Lookahead
+    } else {
+        limiter::Mode::Direct
+    }
 }
 
 /// A linear fade between 0 and 1.

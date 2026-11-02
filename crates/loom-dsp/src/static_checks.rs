@@ -9,6 +9,7 @@ const fn is_send<T: Send>() {}
 const fn is_copy<T: Copy>() {}
 
 const _: () = {
+    is_send::<delay::Allpass>();
     is_send::<delay::DelayLine>();
     is_send::<envelope::Envelope>();
     is_send::<filter::dc_blocker::DcBlocker>();
@@ -23,5 +24,7 @@ const _: () = {
     is_send::<slew::Slew>();
 
     is_copy::<envelope::Settings>();
+    is_copy::<filter::ladder::Coefficients>();
+    is_copy::<filter::one_pole::Coefficients>();
     is_copy::<filter::svf::Coefficients>();
 };

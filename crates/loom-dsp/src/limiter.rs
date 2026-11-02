@@ -16,6 +16,28 @@
 
 use std::collections::VecDeque;
 
+/// What sets a [`Limiter`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Settings {
+    /// The highest peak allowed out.
+    pub ceiling: f32,
+    /// How far ahead [`Mode::Lookahead`] looks, in samples.
+    pub lookahead: usize,
+    /// The time constant of recovery.
+    pub release_seconds: f32,
+    /// The sample rate in hertz.
+    pub sample_rate: f32,
+}
+
+/// How a [`Limiter`] acts on a peak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The gain falls in the sample that goes over. No latency.
+    Direct,
+    /// The audio is delayed, and the gain falls before the peak arrives.
+    Lookahead,
+}
+
 /// The running state of one stereo limiter. All memory is allocated in
 /// [`Limiter::new`], so neither `tick` nor `reset` allocates. It is not
 /// `Clone`: a cloned `VecDeque` has room only for its current length, so the
@@ -29,6 +51,7 @@ pub struct Limiter {
     /// Per-sample factor that moves the gain toward 1.
     release: f32,
     lookahead: usize,
+    mode: Mode,
     /// Delayed audio, `lookahead` frames.
     delay: VecDeque<(f32, f32)>,
     /// Sliding minimum of the needed gain: (sample number, gain), with gains
@@ -42,14 +65,21 @@ pub struct Limiter {
 }
 
 impl Limiter {
-    /// Creates a limiter. `release_seconds` is the time constant of recovery.
+    /// Creates a limiter in [`Mode::Direct`].
     #[inline]
-    pub fn new(ceiling: f32, lookahead: usize, release_seconds: f32, sample_rate: f32) -> Self {
+    pub fn new(settings: Settings) -> Self {
+        let Settings {
+            ceiling,
+            lookahead,
+            release_seconds,
+            sample_rate,
+        } = settings;
         let mut limiter = Self {
             ceiling,
             gain: 1.0,
             release: (-1.0 / (release_seconds * sample_rate)).exp(),
             lookahead,
+            mode: Mode::Direct,
             delay: VecDeque::with_capacity(lookahead + 1),
             minimum: VecDeque::with_capacity(lookahead + 2),
             window: VecDeque::with_capacity(lookahead + 2),
@@ -60,7 +90,16 @@ impl Limiter {
         limiter
     }
 
-    /// The lookahead in samples, which is also the latency when it is used.
+    /// Changes the mode and resets, because the delay line runs only in
+    /// [`Mode::Lookahead`], so what it holds is out of date after a change.
+    #[inline]
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.reset();
+    }
+
+    /// The lookahead in samples, which is also the latency in
+    /// [`Mode::Lookahead`].
     #[inline]
     pub fn lookahead(&self) -> usize {
         self.lookahead
@@ -80,17 +119,15 @@ impl Limiter {
         self.count = 0;
     }
 
-    /// Processes one stereo sample. Both inputs must be finite. Use one value
-    /// of `lookahead` between resets: the delay line runs only while it is on.
+    /// Processes one stereo sample. Both inputs must be finite.
     #[inline]
-    pub fn tick(&mut self, left: f32, right: f32, lookahead: bool) -> (f32, f32) {
+    pub fn tick(&mut self, left: f32, right: f32) -> (f32, f32) {
         debug_assert!(left.is_finite() && right.is_finite(), "input {left}, {right}");
         let peak = left.abs().max(right.abs());
         let needed = if peak > self.ceiling { self.ceiling / peak } else { 1.0 };
-        let (target, left, right) = if lookahead {
-            self.look_ahead(needed, left, right)
-        } else {
-            (needed, left, right)
+        let (target, left, right) = match self.mode {
+            Mode::Lookahead => self.look_ahead(needed, left, right),
+            Mode::Direct => (needed, left, right),
         };
         let released = 1.0 - (1.0 - self.gain) * self.release;
         self.gain = target.min(released);

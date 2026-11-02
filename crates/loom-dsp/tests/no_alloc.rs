@@ -8,13 +8,11 @@
 #![cfg(debug_assertions)]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use loom_dsp::delay::DelayLine;
+use loom_dsp::delay::{Allpass, DelayLine};
 use loom_dsp::envelope::{Envelope, Settings, power};
 use loom_dsp::filter::dc_blocker::DcBlocker;
-use loom_dsp::filter::ladder::Ladder;
-use loom_dsp::filter::one_pole::OnePole;
-use loom_dsp::filter::{prewarp, svf};
-use loom_dsp::limiter::Limiter;
+use loom_dsp::filter::{ladder, one_pole, svf};
+use loom_dsp::limiter::{self, Limiter, Mode};
 use loom_dsp::noise::{Colour, Noise};
 use loom_dsp::oscillator::{Pulse, Saw, SlowWave, Triangle};
 use loom_dsp::slew::Slew;
@@ -35,25 +33,31 @@ fn falling_peaks(i: usize) -> f32 {
 #[test]
 fn filters_never_allocate() {
     let mut state_variable = svf::Svf::new();
-    let mut one_pole = OnePole::new();
+    let mut one_pole = one_pole::OnePole::new();
     let mut dc = DcBlocker::new(5.0, RATE);
-    let mut ladder = Ladder::new(RATE);
+    let mut ladder = ladder::Ladder::new(RATE);
     assert_no_alloc(|| {
         for i in 0..FRAMES {
             let x = falling_peaks(i);
             state_variable.tick(x, svf::Coefficients::new(1_000.0, 0.5, RATE));
-            one_pole.tick(x, prewarp(1_000.0, RATE));
+            one_pole.tick(x, one_pole::Coefficients::new(1_000.0, RATE));
             dc.tick(x);
             if i == 10 {
-                ladder.change_slope(0);
+                ladder.change_slope(ladder::Slope::Db12);
             }
-            let limit = ladder.step_slope();
-            ladder.tick(x, prewarp(1_000.0, RATE), limit, 1.0);
+            let feedback = ladder.step_slope();
+            let settings = ladder::Settings {
+                cutoff_hz: 1_000.0,
+                feedback,
+                input_gain: 1.0,
+                sample_rate: RATE,
+            };
+            ladder.tick(x, ladder::Coefficients::new(settings));
         }
         state_variable.reset();
         one_pole.reset();
         dc.reset();
-        ladder.reset(1);
+        ladder.reset(ladder::Slope::Db18);
         ladder.clear_loop();
     });
 }
@@ -128,15 +132,18 @@ fn envelope_and_slew_never_allocate() {
 #[test]
 fn delays_never_allocate() {
     let mut delay = DelayLine::new(0.002, RATE);
-    let mut allpass = DelayLine::new(0.002, RATE);
+    let mut allpass = Allpass::new(0.002, RATE);
     let other = DelayLine::new(0.002, RATE);
+    let other_allpass = Allpass::new(0.002, RATE);
     assert_no_alloc(|| {
         for i in 0..FRAMES {
-            delay.step_delay(falling_peaks(i), 20.5);
-            allpass.step_allpass(falling_peaks(i), 20.5, 0.5);
+            delay.tick(falling_peaks(i), 20.5);
+            allpass.tick(falling_peaks(i), 20.5, 0.5);
         }
         assert!(delay.copy_from(&other));
-        delay.clear();
+        assert!(allpass.copy_from(&other_allpass));
+        delay.reset();
+        allpass.reset();
     });
 }
 
@@ -144,16 +151,19 @@ fn delays_never_allocate() {
 /// minimum, which fills its queue to the most it can hold.
 #[test]
 fn the_limiter_never_allocates() {
-    let lookahead = 96;
-    let mut limiter = Limiter::new(0.9, lookahead, 0.1, RATE);
+    let mut limiter = Limiter::new(limiter::Settings {
+        ceiling: 0.9,
+        lookahead: 96,
+        release_seconds: 0.1,
+        sample_rate: RATE,
+    });
     assert_no_alloc(|| {
-        for i in 0..FRAMES {
-            limiter.tick(falling_peaks(i), falling_peaks(i), true);
+        for mode in [Mode::Lookahead, Mode::Direct] {
+            limiter.set_mode(mode);
+            for i in 0..FRAMES {
+                limiter.tick(falling_peaks(i), falling_peaks(i));
+            }
+            limiter.reset();
         }
-        limiter.reset();
-        for i in 0..FRAMES {
-            limiter.tick(falling_peaks(i), falling_peaks(i), false);
-        }
-        limiter.reset();
     });
 }

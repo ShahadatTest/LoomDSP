@@ -5,7 +5,7 @@ use loom_core::{
     Channels, Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo,
     PortSpec, ProcessContext, SignalType, Widget,
 };
-use loom_dsp::filter::{ladder, one_pole, prewarp, svf};
+use loom_dsp::filter::{ladder, one_pole, svf};
 use loom_rt::Smoothed;
 
 /// `loom.filter.svf`: state variable filter with lowpass, bandpass,
@@ -268,13 +268,12 @@ pub static ONEPOLE: ModuleDescriptor = ModuleDescriptor {
     displays: &[],
 };
 
-/// State for `loom.filter.onepole`: the smoothed cutoff and the integrator.
+/// State for `loom.filter.onepole`: the smoothed cutoff and the filter.
 #[derive(Clone)]
 struct OnePole {
     sample_rate: f32,
     /// The cutoff in pitch units, smoothed over 10 ms.
     cutoff: Smoothed,
-    /// The trapezoidal integrator state: the lowpass output so far.
     filter: one_pole::OnePole,
 }
 
@@ -314,10 +313,10 @@ impl Module for OnePole {
             // and it would reach the state and stay there. Use a safe
             // cutoff for that frame instead. Infinity is clamped as usual.
             let cutoff_hz = if cutoff_hz.is_nan() { 1_000.0 } else { cutoff_hz }.clamp(0.5, nyquist_limit);
-            let g = prewarp(cutoff_hz, self.sample_rate);
+            let coefficients = one_pole::Coefficients::new(cutoff_hz, self.sample_rate);
             let x = input[i];
             let x = if x.is_finite() { x } else { 0.0 };
-            let outputs = self.filter.tick(x, g);
+            let outputs = self.filter.tick(x, coefficients);
             lp[i] = outputs.low;
             hp[i] = outputs.high;
         }
@@ -464,19 +463,29 @@ fn ladder_preview(params: &[f32], x: f32) -> f32 {
     let (cutoff, resonance, slope) = (params[Ladder::CUTOFF], params[Ladder::RESONANCE], params[Ladder::SLOPE]);
     let frequency = 20.0 * 1000.0_f32.powf(x.clamp(0.0, 1.0));
     let ratio = frequency / cutoff.max(20.0);
-    let stage = slope.round().clamp(0.0, 2.0) as usize;
+    let slope = slope_from(slope);
     let mut real = 1.0;
     let mut imaginary = 0.0;
-    for _ in 0..stage + 2 {
+    for _ in 0..slope.stages() {
         (real, imaginary) = (real - imaginary * ratio, imaginary + real * ratio);
     }
-    let feedback = resonance.clamp(0.0, 1.0) * ladder::K_MAX[stage];
+    let feedback = resonance.clamp(0.0, 1.0) * slope.feedback_limit();
     let magnitude = 1.0 / ((real + feedback).powi(2) + imaginary.powi(2)).sqrt();
     ((20.0 * magnitude.log10() + 60.0) / 72.0).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
 mod preview_tests;
+
+/// The slope a knob or a modulated value selects. Rounds to the nearest of 0,
+/// 1, and 2, and NaN gives 0.
+fn slope_from(value: f32) -> ladder::Slope {
+    match value.round().clamp(0.0, 2.0) as usize {
+        0 => ladder::Slope::Db12,
+        1 => ladder::Slope::Db18,
+        _ => ladder::Slope::Db24,
+    }
+}
 
 /// The input gain at drive 1: 8 times, +18 dB.
 const LADDER_MAX_DRIVE: f32 = 8.0;
@@ -489,8 +498,8 @@ struct Ladder {
     cutoff: Smoothed,
     resonance: Smoothed,
     drive: Smoothed,
-    /// The knob's slope, 0 to 2. Modulation counts for one frame only.
-    slope: usize,
+    /// The knob's slope. Modulation counts for one frame only.
+    slope: ladder::Slope,
     filter: ladder::Ladder,
 }
 
@@ -512,7 +521,7 @@ impl Ladder {
             ),
             resonance: Smoothed::new(0.2, config.sample_rate, params[Self::RESONANCE].options.smooth_seconds),
             drive: Smoothed::new(0.0, config.sample_rate, params[Self::DRIVE].options.smooth_seconds),
-            slope: 2,
+            slope: ladder::Slope::Db24,
             filter: ladder::Ladder::new(config.sample_rate),
         }
     }
@@ -541,7 +550,7 @@ impl Module for Ladder {
             let cutoff_hz = if cutoff_hz.is_nan() { 1_000.0 } else { cutoff_hz }.clamp(5.0, nyquist_limit);
             let resonance = resonance_param.at_or(i, self.resonance.tick()).clamp(0.0, 1.0);
             let drive = drive_param.at_or(i, self.drive.tick()).clamp(0.0, 1.0);
-            let slope = slope_param.map_or(i, self.slope, |v| v.round().clamp(0.0, 2.0) as usize);
+            let slope = slope_param.map_or(i, self.slope, slope_from);
             if slope != self.filter.target() {
                 self.filter.change_slope(slope);
             }
@@ -554,10 +563,14 @@ impl Module for Ladder {
                 out[i] = 0.0;
                 continue;
             }
-            let g = prewarp(cutoff_hz, self.sample_rate);
-            // Drive 0 to 1 is a gain of 1 to 8, even in dB.
-            let gain = LADDER_MAX_DRIVE.powf(drive);
-            out[i] = self.filter.tick(x, g, resonance * limit, gain);
+            let coefficients = ladder::Coefficients::new(ladder::Settings {
+                cutoff_hz,
+                feedback: resonance * limit,
+                // Drive 0 to 1 is a gain of 1 to 8, even in dB.
+                input_gain: LADDER_MAX_DRIVE.powf(drive),
+                sample_rate: self.sample_rate,
+            });
+            out[i] = self.filter.tick(x, coefficients);
         }
     }
 
@@ -566,7 +579,7 @@ impl Module for Ladder {
             Self::CUTOFF => self.cutoff.set_target(pitch::from_hz(value)),
             Self::RESONANCE => self.resonance.set_target(value),
             Self::DRIVE => self.drive.set_target(value),
-            Self::SLOPE => self.slope = value.round().clamp(0.0, 2.0) as usize,
+            Self::SLOPE => self.slope = slope_from(value),
             _ => {}
         }
     }

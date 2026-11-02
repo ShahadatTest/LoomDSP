@@ -551,13 +551,11 @@ pub static SLEW: ModuleDescriptor = ModuleDescriptor {
     displays: &[],
 };
 
-/// State for `loom.level.slew`: the rise and fall times, and `out`, the value
-/// the output has reached on its way to the input.
+/// State for `loom.level.slew`: the rise and fall times, and the limiter.
 ///
-/// `out` is an `f64`. *Why:* a long rise makes a step of about 2e-6 per
-/// sample, and an `f32` at 64 or more cannot add a step that small (its
-/// spacing there is 7.6e-6), so a slewed Hz value would freeze. The output
-/// is cast to `f32` only when it is written.
+/// The limiter keeps its output in `f64`. *Why:* a long rise makes a step of
+/// about 2e-6 per sample, and an `f32` at 64 or more cannot add a step that
+/// small (its spacing there is 7.6e-6), so a slewed Hz value would freeze.
 #[derive(Clone)]
 struct Slew {
     rise: f32,

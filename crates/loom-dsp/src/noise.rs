@@ -112,12 +112,6 @@ impl Noise {
         self.brown = other.brown;
     }
 
-    /// The white and pink stream states, so tests can look for overlap.
-    #[inline]
-    pub fn streams(&self) -> (u32, u32) {
-        (self.state, self.aux)
-    }
-
     /// The next sample of a colour. All colours advance the white stream, so
     /// a change of colour does not shift it.
     #[inline]

@@ -5,7 +5,9 @@
 //! 1974. M. R. Schroeder and B. F. Logan, "Colorless Artificial Reverberation",
 //! JAES 9, 1961.
 
-/// A circular buffer. Memory is allocated only in [`DelayLine::new`].
+/// A circular buffer. Memory is allocated only in [`DelayLine::new`]. To take
+/// another line's state on the audio thread, use [`DelayLine::copy_from`]:
+/// `clone` and `clone_from` allocate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DelayLine {
     samples: Box<[f32]>,
@@ -43,7 +45,7 @@ impl DelayLine {
 
     /// Zeroes all buffered samples and resets the write index.
     #[inline]
-    pub fn clear(&mut self) {
+    pub fn reset(&mut self) {
         self.samples.fill(0.0);
         self.write = 0;
     }
@@ -99,11 +101,11 @@ impl DelayLine {
         }
     }
 
-    /// Delay-line step: writes `input` at age 0, reads at `raw_samples`
-    /// clamped to `[1.0, max_samples]`, and advances. `input` must be finite,
-    /// or a bad sample comes out again one delay time later.
+    /// One sample: writes `input` at age 0, reads at `raw_samples` clamped to
+    /// `[1.0, max_samples]`, and advances. `input` must be finite, or a bad
+    /// sample comes out again one delay time later.
     #[inline]
-    pub fn step_delay(&mut self, input: f32, raw_samples: f64) -> f32 {
+    pub fn tick(&mut self, input: f32, raw_samples: f64) -> f32 {
         debug_assert!(input.is_finite(), "input {input}");
         let delay_samples = self.clamp_delay(raw_samples, 1.0);
         self.samples[self.write] = input;
@@ -111,18 +113,53 @@ impl DelayLine {
         self.advance();
         out
     }
+}
 
-    /// Schroeder all-pass step: reads at `raw_samples` clamped to
-    /// `[2.0, max_samples]` (so `k - 1 >= 1` only reads past `w` values),
-    /// flushes denormals on the feedback product, sanitizes non-finite state
-    /// so a bad sample cannot circulate forever, writes `w`, and advances.
+/// A Schroeder all-pass: a flat magnitude response, with the phase changed. It
+/// is its own type because it writes something else into its memory than a
+/// delay does, the input plus the feedback. Mixing the two on one line would be
+/// silently wrong.
+///
+/// As with [`DelayLine`], use [`Allpass::copy_from`] on the audio thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Allpass {
+    line: DelayLine,
+}
+
+impl Allpass {
+    /// Allocates memory for `max_seconds` at `sample_rate`.
+    #[inline]
+    pub fn new(max_seconds: f32, sample_rate: f32) -> Self {
+        Self {
+            line: DelayLine::new(max_seconds, sample_rate),
+        }
+    }
+
+    /// Copies `other` into this one, with no allocation. False when the two
+    /// have different lengths.
+    #[inline]
+    pub fn copy_from(&mut self, other: &Self) -> bool {
+        self.line.copy_from(&other.line)
+    }
+
+    /// Clears the memory.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.line.reset();
+    }
+
+    /// One sample: reads at `raw_samples` clamped to `[2.0, max_samples]` (so
+    /// `k - 1 >= 1` only reads past `w` values), flushes denormals on the
+    /// feedback product, sanitizes non-finite state so a bad sample cannot
+    /// circulate forever, writes `w`, and advances.
     ///
     /// The check on `w` is here because it sits inside the feedback path,
     /// where a caller cannot reach it.
     #[inline]
-    pub fn step_allpass(&mut self, input: f32, raw_samples: f64, gain: f32) -> f32 {
-        let delay_samples = self.clamp_delay(raw_samples, 2.0);
-        let delayed = self.read_catmull_rom(delay_samples);
+    pub fn tick(&mut self, input: f32, raw_samples: f64, gain: f32) -> f32 {
+        let line = &mut self.line;
+        let delay_samples = line.clamp_delay(raw_samples, 2.0);
+        let delayed = line.read_catmull_rom(delay_samples);
         let mut feedback = gain * delayed;
         if feedback.abs() < 1e-20 {
             feedback = 0.0;
@@ -132,8 +169,8 @@ impl DelayLine {
             w = 0.0;
         }
         let out = delayed - gain * w;
-        self.samples[self.write] = w;
-        self.advance();
+        line.samples[line.write] = w;
+        line.advance();
         out
     }
 }

@@ -10,10 +10,12 @@
 //!   stage, the prewarped cutoff, and solving the feedback loop with no unit
 //!   delay in it (zero-delay feedback).
 
+use super::prewarp;
+
 /// The number of one-pole stages the ladder always runs.
 const STAGES: usize = 4;
 
-/// The feedback gain at full resonance for each slope (2, 3, and 4 stages).
+/// The feedback gain at full resonance for each [`Slope`].
 ///
 /// For N identical stages `1 / (1 + s)` with feedback `-k`, the loop rings
 /// forever when `(1 + s)^N = -k` has a root on the imaginary axis: `k = 8`
@@ -22,18 +24,91 @@ const STAGES: usize = 4;
 /// 24 dB values are 5% above the limit: at the limit itself the loop only
 /// keeps an oscillation that is already there, and the tanh in the feedback
 /// pulls it below, so full resonance would not sing.
-pub const K_MAX: [f32; 3] = [8.0, 8.4, 4.2];
+const K_MAX: [f32; 3] = [8.0, 8.4, 4.2];
 
 /// How fast the feedback limit moves during a slope change, per second:
 /// from 8.4 to 4.2 in 10 ms.
 const LIMIT_RAMP: f32 = (8.4 - 4.2) / 0.01;
 
-/// The running state of one ladder. A slope is an index: 0, 1, or 2 for 2, 3,
-/// or 4 stages.
+/// How many stages are heard, and so how steeply the filter falls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slope {
+    /// Two stages, 12 dB per octave.
+    Db12,
+    /// Three stages, 18 dB per octave.
+    Db18,
+    /// Four stages, 24 dB per octave.
+    Db24,
+}
+
+impl Slope {
+    /// The number of stages heard.
+    #[inline]
+    pub fn stages(self) -> usize {
+        self.tap() + 2
+    }
+
+    /// The feedback gain at full resonance.
+    #[inline]
+    pub fn feedback_limit(self) -> f32 {
+        K_MAX[self.tap()]
+    }
+
+    /// The output tap: after stage 2, 3, or 4.
+    #[inline]
+    fn tap(self) -> usize {
+        match self {
+            Self::Db12 => 0,
+            Self::Db18 => 1,
+            Self::Db24 => 2,
+        }
+    }
+}
+
+/// What sets the [`Coefficients`] for one sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Settings {
+    /// The cutoff. Above 0 and below half of `sample_rate`.
+    pub cutoff_hz: f32,
+    /// The feedback gain, from 0 to the [`Slope::feedback_limit`].
+    pub feedback: f32,
+    /// The gain on the input, before the saturation in the loop.
+    pub input_gain: f32,
+    /// The sample rate in hertz.
+    pub sample_rate: f32,
+}
+
+/// The filter's settings for one sample. Computing them costs a tangent, so a
+/// caller with a fixed cutoff computes them once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Coefficients {
+    /// A stage's gain from its input: `g / (1 + g)`.
+    big_g: f32,
+    /// A stage's gain from its state: `1 / (1 + g)`.
+    carry: f32,
+    feedback: f32,
+    input_gain: f32,
+}
+
+impl Coefficients {
+    /// Computes the settings.
+    #[inline]
+    pub fn new(settings: Settings) -> Self {
+        let g = prewarp(settings.cutoff_hz, settings.sample_rate);
+        Self {
+            big_g: g / (1.0 + g),
+            carry: 1.0 / (1.0 + g),
+            feedback: settings.feedback,
+            input_gain: settings.input_gain,
+        }
+    }
+}
+
+/// The running state of one ladder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ladder {
     /// The slope the output is at or fading to.
-    target: usize,
+    target: Slope,
     /// How much each tap (after stage 2, 3, and 4) adds to the output and
     /// to the feedback. One of them is 1, except during a slope change.
     weights: [f32; 3],
@@ -62,12 +137,12 @@ impl Ladder {
     #[inline]
     pub fn new(sample_rate: f32) -> Self {
         Self {
-            target: 2,
+            target: Slope::Db24,
             weights: [0.0, 0.0, 1.0],
             from: [0.0, 0.0, 1.0],
             fade: 1.0,
             fade_step: 1.0 / (0.01 * sample_rate).max(1.0),
-            limit: K_MAX[2],
+            limit: Slope::Db24.feedback_limit(),
             limit_step: LIMIT_RAMP / sample_rate,
             state: [0.0; STAGES],
             saturation: 1.0,
@@ -76,13 +151,13 @@ impl Ladder {
 
     /// Clears the loop and goes straight to `slope`, with no crossfade.
     #[inline]
-    pub fn reset(&mut self, slope: usize) {
+    pub fn reset(&mut self, slope: Slope) {
         self.target = slope;
         self.weights = [0.0; 3];
-        self.weights[slope] = 1.0;
+        self.weights[slope.tap()] = 1.0;
         self.from = self.weights;
         self.fade = 1.0;
-        self.limit = K_MAX[slope];
+        self.limit = slope.feedback_limit();
         self.clear_loop();
     }
 
@@ -96,14 +171,14 @@ impl Ladder {
 
     /// The slope the output is at or fading to.
     #[inline]
-    pub fn target(&self) -> usize {
+    pub fn target(&self) -> Slope {
         self.target
     }
 
     /// Starts a 10 ms crossfade from the current tap weights to `slope`.
     /// A change during a crossfade starts from where that one had got to.
     #[inline]
-    pub fn change_slope(&mut self, slope: usize) {
+    pub fn change_slope(&mut self, slope: Slope) {
         self.target = slope;
         self.from = self.weights;
         self.fade = 0.0;
@@ -125,7 +200,7 @@ impl Ladder {
             .iter()
             .zip(K_MAX)
             .enumerate()
-            .filter(|&(tap, (&w, _))| tap == self.target || w > 0.0)
+            .filter(|&(tap, (&w, _))| tap == self.target.tap() || w > 0.0)
             .map(|(_, (_, k))| k)
             .fold(f32::INFINITY, f32::min);
         self.limit = if self.limit > wanted {
@@ -133,23 +208,21 @@ impl Ladder {
         } else {
             (self.limit + self.limit_step).min(wanted)
         };
-        if self.fade < 1.0 && self.limit <= K_MAX[self.target] {
+        if self.fade < 1.0 && self.limit <= self.target.feedback_limit() {
             self.fade = (self.fade + self.fade_step).min(1.0);
             for (tap, weight) in self.weights.iter_mut().enumerate() {
-                let to = if tap == self.target { 1.0 } else { 0.0 };
+                let to = if tap == self.target.tap() { 1.0 } else { 0.0 };
                 *weight = self.from[tap] + (to - self.from[tap]) * self.fade;
             }
             if self.fade >= 1.0 {
                 self.weights = [0.0; 3];
-                self.weights[self.target] = 1.0;
+                self.weights[self.target.tap()] = 1.0;
             }
         }
         self.limit
     }
 
-    /// One frame of the filter: input `x`, prewarped gain `g` from
-    /// [`super::prewarp`], feedback gain `k`, input gain `gain`. Returns the
-    /// output. `x` must be finite.
+    /// One frame of the filter. Returns the output. `x` must be finite.
     ///
     /// Each stage is Zavalishin's trapezoidal one-pole: with
     /// `G = g / (1 + g)`, its output is `y = G·x + s / (1 + g)`, where `s`
@@ -160,10 +233,14 @@ impl Ladder {
     /// division, with no unit delay in the loop (zero-delay feedback). The
     /// secant slope is at most 1, so it only ever lowers the loop gain.
     #[inline]
-    pub fn tick(&mut self, x: f32, g: f32, k: f32, gain: f32) -> f32 {
+    pub fn tick(&mut self, x: f32, coefficients: Coefficients) -> f32 {
         debug_assert!(x.is_finite(), "input {x}");
-        let big_g = g / (1.0 + g);
-        let carry = 1.0 / (1.0 + g);
+        let Coefficients {
+            big_g,
+            carry,
+            feedback: k,
+            input_gain: gain,
+        } = coefficients;
         // The taps after stages 2, 3, and 4 as `a·u + b`.
         let (mut a, mut b) = (1.0, 0.0);
         let mut taps = [(0.0, 0.0); 3];

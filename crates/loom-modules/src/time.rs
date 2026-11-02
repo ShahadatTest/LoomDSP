@@ -10,7 +10,7 @@ use loom_core::{
     Channels, Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo,
     PortSpec, ProcessContext, SignalType, Widget,
 };
-use loom_dsp::delay::DelayLine;
+use loom_dsp::delay;
 use loom_rt::Smoothed;
 
 /// `loom.time.delay`: interpolated delay line (`MT-DELAY-02`).
@@ -139,7 +139,7 @@ struct Delay {
     sample_rate: f64,
     /// Smoothed in normalised 0..1 knob position, matching `ParamFill`.
     time: Smoothed,
-    buffer: DelayLine,
+    buffer: delay::DelayLine,
 }
 
 impl Delay {
@@ -155,7 +155,7 @@ impl Delay {
                 config.sample_rate,
                 spec.options.smooth_seconds,
             ),
-            buffer: DelayLine::new(spec.max, config.sample_rate),
+            buffer: delay::DelayLine::new(spec.max, config.sample_rate),
         }
     }
 }
@@ -187,7 +187,7 @@ impl Module for Delay {
             let raw_samples = (f64::from(base_time) + f64::from(time_in[i])) * self.sample_rate;
             // A bad sample must not come out again one delay time later (#127).
             let x = if input[i].is_finite() { input[i] } else { 0.0 };
-            out[i] = self.buffer.step_delay(x, raw_samples);
+            out[i] = self.buffer.tick(x, raw_samples);
         }
     }
 
@@ -209,7 +209,7 @@ impl Module for Delay {
 
     /// Clears the delay buffer and settles the delay-time smoother.
     fn reset(&mut self) {
-        self.buffer.clear();
+        self.buffer.reset();
         self.time.reset(self.time.target());
     }
 }
@@ -220,7 +220,7 @@ struct Allpass {
     /// Smoothed in normalised 0..1 knob position, matching `ParamFill`.
     time: Smoothed,
     gain: Smoothed,
-    buffer: DelayLine,
+    buffer: delay::Allpass,
 }
 
 impl Allpass {
@@ -239,7 +239,7 @@ impl Allpass {
                 time_spec.options.smooth_seconds,
             ),
             gain: Smoothed::new(gain_spec.default, config.sample_rate, gain_spec.options.smooth_seconds),
-            buffer: DelayLine::new(time_spec.max, config.sample_rate),
+            buffer: delay::Allpass::new(time_spec.max, config.sample_rate),
         }
     }
 }
@@ -272,7 +272,7 @@ impl Module for Allpass {
             let base_time = time_modulated.at_or(i, time_spec.denormalize(pos));
             let gain = gain_modulated.at_or(i, self.gain.tick()).clamp(-0.95, 0.95);
             let raw_samples = (f64::from(base_time) + f64::from(time_in[i])) * self.sample_rate;
-            out[i] = self.buffer.step_allpass(input[i], raw_samples, gain);
+            out[i] = self.buffer.tick(input[i], raw_samples, gain);
         }
     }
 
@@ -299,7 +299,7 @@ impl Module for Allpass {
 
     /// Clears the delay buffer and settles the time and gain smoothers.
     fn reset(&mut self) {
-        self.buffer.clear();
+        self.buffer.reset();
         self.time.reset(self.time.target());
         self.gain.reset(self.gain.target());
     }
