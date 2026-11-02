@@ -5,7 +5,8 @@
 //!
 //! - **A function** such as [`saw`] takes the true step. A caller who knows its
 //!   own rate uses this. A reset or a hard sync jump stays a jump, and does not
-//!   read as a very high pitch.
+//!   read as a very high pitch. The step is a size, so for a phase running
+//!   backward pass the absolute value of a negative step.
 //! - **A struct** such as [`Saw`] works the step out from the last phase. This
 //!   suits a phase that arrives from elsewhere, such as a cable, and a phase
 //!   can be bent or modulated with nothing else to say how fast it moves.
@@ -76,8 +77,9 @@ fn wrap(x: f32) -> f32 {
     x - x.floor()
 }
 
-/// A band-limited saw at `t` from 0 to 1. `step` is the phase step per sample.
-/// With a `step` outside 0 to 0.5 there is no band limiting.
+/// A band-limited saw at `t` from 0 to 1. `step` is the size of the phase step
+/// per sample, positive in either direction. With a `step` outside 0 to 0.5
+/// there is no band limiting.
 #[inline]
 pub fn saw(t: f32, step: f32) -> f32 {
     let mut y = 2.0 * t - 1.0;
@@ -88,8 +90,9 @@ pub fn saw(t: f32, step: f32) -> f32 {
 }
 
 /// A band-limited pulse at `t` from 0 to 1, with `width` between 0 and 1. `step`
-/// is the phase step at the rising edge. `step_fall` is the step at the falling
-/// edge, which differs while the width moves.
+/// is the size of the phase step at the rising edge, positive in either
+/// direction. `step_fall` is the same at the falling edge, which differs while
+/// the width moves.
 #[inline]
 pub fn pulse(t: f32, width: f32, step: f32, step_fall: f32) -> f32 {
     pulse_unclamped(t, width, step, step_fall).clamp(-1.0, 1.0)
@@ -121,7 +124,8 @@ fn pulse_unclamped(t: f32, width: f32, step: f32, step_fall: f32) -> f32 {
 }
 
 /// A band-limited triangle at `t` from 0 to 1, aligned with a sine: 0 at 0, +1
-/// at 0.25, 0 at 0.5, and -1 at 0.75. `step` is the phase step per sample.
+/// at 0.25, 0 at 0.5, and -1 at 0.75. `step` is the size of the phase step per
+/// sample, positive in either direction.
 #[inline]
 pub fn triangle(t: f32, step: f32) -> f32 {
     let t_top = wrap(t - 0.25);

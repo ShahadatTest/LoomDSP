@@ -1,13 +1,14 @@
 //! The crate depends on nothing that reaches its users (ADR-0035). Dev
 //! dependencies are allowed, because they only build its tests.
 
-/// True for a manifest section that adds a dependency for users of the crate.
-fn adds_user_dependencies(section: &str) -> bool {
-    let name = section.rsplit('.').next().unwrap_or(section);
-    name == "dependencies" || name == "build-dependencies"
+/// True for a TOML key path, such as `target.'cfg(unix)'.dependencies.foo`, that
+/// gives users a dependency.
+fn is_user_dependency(path: &str) -> bool {
+    path.split('.')
+        .any(|part| part == "dependencies" || part == "build-dependencies")
 }
 
-/// The entries of `manifest` that would give users a dependency.
+/// The key paths in `manifest` that would give users a dependency.
 fn user_dependencies(manifest: &str) -> Vec<String> {
     let mut section = String::new();
     let mut found = Vec::new();
@@ -15,14 +16,19 @@ fn user_dependencies(manifest: &str) -> Vec<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(name) = line.strip_prefix('[') {
-            section = name.trim_end_matches(']').to_string();
-            // `[dependencies.foo]` is an entry by itself.
-            if section.contains("dependencies.") && !section.contains("dev-dependencies") {
-                found.push(section.clone());
+        if let Some(rest) = line.strip_prefix('[') {
+            // Up to the bracket, so a comment after a header is left out.
+            section = rest.split(']').next().unwrap_or(rest).trim().to_string();
+        } else {
+            let key = line.split('=').next().unwrap_or(line).trim();
+            let path = if section.is_empty() {
+                key.to_string()
+            } else {
+                format!("{section}.{key}")
+            };
+            if is_user_dependency(&path) {
+                found.push(path);
             }
-        } else if adds_user_dependencies(&section) {
-            found.push(line.to_string());
         }
     }
     found
@@ -35,22 +41,27 @@ fn the_crate_has_no_user_dependencies() {
 }
 
 /// The check above can fail: it sees each way to write a dependency, and
-/// allows dev dependencies.
+/// allows dev dependencies and the word in other text.
 #[test]
 fn the_check_sees_each_form() {
-    assert_eq!(user_dependencies("[dependencies]\nfoo = \"1\"\n"), ["foo = \"1\""]);
+    let foo = ["dependencies.foo"];
+    assert_eq!(user_dependencies("[dependencies]\nfoo = \"1\"\n"), foo);
+    assert_eq!(user_dependencies("[dependencies] # a comment\nfoo = \"1\"\n"), foo);
+    assert_eq!(user_dependencies("[ dependencies ]\nfoo = \"1\"\n"), foo);
+    assert_eq!(user_dependencies("dependencies.foo = \"1\"\n"), foo);
+    assert_eq!(
+        user_dependencies("[dependencies.foo]\nversion = \"1\"\n"),
+        ["dependencies.foo.version"]
+    );
     assert_eq!(
         user_dependencies("[build-dependencies]\nfoo = \"1\"\n"),
-        ["foo = \"1\""]
+        ["build-dependencies.foo"]
     );
     assert_eq!(
         user_dependencies("[target.'cfg(unix)'.dependencies]\nfoo = \"1\"\n"),
-        ["foo = \"1\""]
-    );
-    assert_eq!(
-        user_dependencies("[dependencies.foo]\nversion = \"1\"\n"),
-        ["dependencies.foo"]
+        ["target.'cfg(unix)'.dependencies.foo"]
     );
     assert!(user_dependencies("[dev-dependencies]\nfoo = \"1\"\n").is_empty());
     assert!(user_dependencies("[dev-dependencies.foo]\nversion = \"1\"\n").is_empty());
+    assert!(user_dependencies("[package]\ndescription = \"no dependencies.\"\n").is_empty());
 }

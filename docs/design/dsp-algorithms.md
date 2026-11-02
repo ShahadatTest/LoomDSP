@@ -27,7 +27,7 @@ The conventions of `loom-dsp`, the crate of pure algorithms that modules wrap.
 
 A band limit needs the phase step. Each shape has a function that takes it (`saw`, `triangle`, `pulse`) and a struct that works it out from the last phase (`Saw`, `Triangle`, `Pulse`).
 
-- **The function** suits a caller who knows its rate. A reset or a hard sync jump is not mistaken for a very high pitch.
+- **The function** suits a caller who knows its rate. A reset or a hard sync jump is not mistaken for a very high pitch. The step is a size: for a phase running backward, a caller passes the absolute value of the negative step from `Phasor::step_for`.
 - **The struct** suits a phase from a cable, which can be bent or modulated with nothing to say how fast it moves. This is what the modules use today.
 
 The sync API itself waits for its own specification. See [phase and cycles](../learn/phase-and-cycles.md).

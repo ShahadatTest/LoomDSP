@@ -141,3 +141,15 @@ fn reset_returns_to_the_start() {
     pulse.reset(0.5);
     assert_eq!(pulse, Pulse::new());
 }
+
+/// A phase running backward, with the size of its step, is band limited too. So
+/// a negative step from a `Phasor` needs only its absolute value.
+#[test]
+fn a_backward_phase_is_band_limited_with_the_step_size() {
+    let step = 0.01;
+    let t = 0.005;
+    assert_eq!(saw(t, step), 2.0 * t - 1.0 - poly_blep(t, step));
+    assert_eq!(saw(t, -step), 2.0 * t - 1.0);
+    assert_ne!(triangle(0.25, step), triangle(0.25, -step));
+    assert_ne!(pulse(t, 0.5, step, step), pulse(t, 0.5, -step, -step));
+}
