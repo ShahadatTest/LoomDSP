@@ -7,8 +7,8 @@
 //!
 //! Pink noise is the Voss-McCartney method (R. F. Voss and J. Clarke, "1/f
 //! noise in music and speech", Nature 258, 1975; the row-update form is from
-//! Gardner, "White and brown music, fractal curves and 1/f fluctuations",
-//! Scientific American, 1978). Brown noise is a leaky integral of white noise,
+//! M. Gardner, "White and brown music, fractal curves and one-over-f
+//! fluctuations", Scientific American, 1978). Brown noise is a leaky integral of white noise,
 //! so it cannot drift away. xorshift is from G. Marsaglia, "Xorshift RNGs",
 //! Journal of Statistical Software, 2003.
 

@@ -39,8 +39,8 @@ pub enum Mode {
 }
 
 /// The running state of one stereo limiter. All memory is allocated in
-/// [`Limiter::new`], so neither `tick` nor `reset` allocates. It is not
-/// `Clone`: a cloned `VecDeque` has room only for its current length, so the
+/// [`Limiter::new`], so `tick`, `reset`, and `copy_from` do not allocate. It is
+/// not `Clone`: a cloned `VecDeque` has room only for its current length, so the
 /// copy's next `tick` would allocate.
 #[derive(Debug)]
 pub struct Limiter {
@@ -96,6 +96,28 @@ impl Limiter {
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
         self.reset();
+    }
+
+    /// Takes the whole state of `other`, with no allocation. False, with nothing
+    /// changed, when the two have different lookaheads, and so different room.
+    #[inline]
+    pub fn copy_from(&mut self, other: &Self) -> bool {
+        if self.lookahead != other.lookahead {
+            return false;
+        }
+        self.ceiling = other.ceiling;
+        self.gain = other.gain;
+        self.release = other.release;
+        self.mode = other.mode;
+        self.delay.clear();
+        self.delay.extend(other.delay.iter().copied());
+        self.minimum.clear();
+        self.minimum.extend(other.minimum.iter().copied());
+        self.window.clear();
+        self.window.extend(other.window.iter().copied());
+        self.window_sum = other.window_sum;
+        self.count = other.count;
+        true
     }
 
     /// The lookahead in samples, which is also the latency in

@@ -157,12 +157,21 @@ fn the_limiter_never_allocates() {
         release_seconds: 0.1,
         sample_rate: RATE,
     });
+    let mut copy = Limiter::new(limiter::Settings {
+        ceiling: 0.9,
+        lookahead: 96,
+        release_seconds: 0.1,
+        sample_rate: RATE,
+    });
     assert_no_alloc(|| {
         for mode in [Mode::Lookahead, Mode::Direct] {
             limiter.set_mode(mode);
             for i in 0..FRAMES {
                 limiter.tick(falling_peaks(i), falling_peaks(i));
             }
+            // The copy takes queues at their fullest, then runs on from there.
+            assert!(copy.copy_from(&limiter));
+            copy.tick(1.0, 1.0);
             limiter.reset();
         }
     });

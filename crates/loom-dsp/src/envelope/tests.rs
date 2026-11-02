@@ -108,3 +108,18 @@ fn reset_returns_to_idle() {
     assert_eq!(env.level(), 0.0);
     assert!(env.tick(true, ADSR) > 0.0);
 }
+
+/// A reset envelope equals a new one, whatever it was doing, and in AD too.
+#[test]
+fn reset_equals_new() {
+    let ad = Settings { ad: true, ..ADSR };
+    for settings in [ADSR, ad] {
+        let mut env = Envelope::new(RATE);
+        // Long enough to be in the decay, which remembers its mode.
+        for _ in 0..frames(settings.attack) + 2 {
+            env.tick(true, settings);
+        }
+        env.reset();
+        assert_eq!(env, Envelope::new(RATE));
+    }
+}

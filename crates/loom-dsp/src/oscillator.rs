@@ -20,6 +20,8 @@
 //!
 //! let step = Phasor::step_for(110.0, 48_000.0);
 //! let (mut phasor, mut inferred) = (Phasor::new(), Saw::new());
+//! // The first sample has no earlier phase to work the step out from.
+//! inferred.tick(phasor.tick(step));
 //! for _ in 0..100 {
 //!     let phase = phasor.tick(step);
 //!     let known = saw(phase, step as f32);
@@ -85,9 +87,9 @@ pub fn saw(t: f32, step: f32) -> f32 {
     y
 }
 
-/// A band-limited pulse at `t` from 0 to 1. `width` must be above 0 and below
-/// 1. `step` is the phase step at the rising edge. `step_fall` is the step at
-/// the falling edge, which differs while the width moves.
+/// A band-limited pulse at `t` from 0 to 1, with `width` between 0 and 1. `step`
+/// is the phase step at the rising edge. `step_fall` is the step at the falling
+/// edge, which differs while the width moves.
 #[inline]
 pub fn pulse(t: f32, width: f32, step: f32, step_fall: f32) -> f32 {
     pulse_unclamped(t, width, step, step_fall).clamp(-1.0, 1.0)

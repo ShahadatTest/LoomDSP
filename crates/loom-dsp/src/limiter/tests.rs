@@ -101,26 +101,6 @@ fn reset_clears_the_state() {
     assert_eq!(limiter.gain, 1.0);
 }
 
-/// The queues reach their fullest on falling peaks, when every sample stays in
-/// the sliding minimum, and `tick` still does not grow them, so it does not
-/// allocate. `reset` keeps the same capacity.
-#[test]
-fn ticks_and_reset_keep_the_capacity_from_new() {
-    let mut limiter = limiter(Mode::Lookahead);
-    let capacity = |l: &Limiter| (l.delay.capacity(), l.minimum.capacity(), l.window.capacity());
-    let start = capacity(&limiter);
-    let mut fullest = 0;
-    for i in 0..LOOKAHEAD * 4 {
-        let peak = 100.0 - i as f32 * 0.1;
-        limiter.tick(peak, -peak);
-        fullest = fullest.max(limiter.minimum.len());
-        assert_eq!(capacity(&limiter), start, "frame {i}");
-    }
-    assert_eq!(fullest, LOOKAHEAD + 1);
-    limiter.reset();
-    assert_eq!(capacity(&limiter), start);
-}
-
 /// A change of mode clears what the delay line held, so old audio cannot come
 /// out later.
 #[test]
@@ -132,4 +112,29 @@ fn changing_the_mode_resets() {
     for _ in 0..=LOOKAHEAD {
         assert_eq!(limiter.tick(0.0, 0.0), (0.0, 0.0));
     }
+}
+
+/// A copy goes on exactly as the original does, and a different lookahead is
+/// refused with nothing changed.
+#[test]
+fn copy_from_takes_the_whole_state() {
+    let mut source = limiter(Mode::Lookahead);
+    for i in 0..500 {
+        source.tick(3.0 * (i as f32 * 0.1).sin(), 0.0);
+    }
+    let mut copy = limiter(Mode::Direct);
+    assert!(copy.copy_from(&source));
+    for i in 0..500 {
+        let x = 3.0 * (i as f32 * 0.17).sin();
+        assert_eq!(copy.tick(x, x), source.tick(x, x), "frame {i}");
+    }
+
+    let mut other = Limiter::new(Settings {
+        ceiling: 0.5,
+        lookahead: LOOKAHEAD + 1,
+        release_seconds: 0.1,
+        sample_rate: RATE,
+    });
+    assert!(!other.copy_from(&source));
+    assert_eq!(other.ceiling, 0.5);
 }

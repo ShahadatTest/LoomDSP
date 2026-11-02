@@ -2,8 +2,8 @@
 //! all-pass built on it.
 //!
 //! Background: E. Catmull and R. Rom, "A Class of Local Interpolating Splines",
-//! 1974. M. R. Schroeder and B. F. Logan, "Colorless Artificial Reverberation",
-//! JAES 9, 1961.
+//! 1974. M. R. Schroeder and B. F. Logan, "'Colorless' Artificial
+//! Reverberation", JAES 9, 1961.
 
 /// A circular buffer. Memory is allocated only in [`DelayLine::new`]. To take
 /// another line's state on the audio thread, use [`DelayLine::copy_from`]:

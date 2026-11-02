@@ -92,6 +92,7 @@ impl Envelope {
         self.start = 0.0;
         self.progress = 0.0;
         self.gate_was_high = false;
+        self.decay_ad = false;
     }
 
     /// The output level.

@@ -1,37 +1,25 @@
 use super::*;
+use crate::testing::{RATE, tone_gain, warped};
 
-const SAMPLE_RATE: f32 = 48_000.0;
+const SAMPLE_RATE: f32 = RATE;
 
 /// The analogue response at `hz`, after the bilinear transform's frequency
 /// warping: the magnitude of the low, band, high, and notch outputs.
 fn theory(hz: f32, cutoff: f32, damping: f32) -> [f64; 4] {
-    let warp = |f: f32| (std::f64::consts::PI * f64::from(f) / f64::from(SAMPLE_RATE)).tan();
-    let w = warp(hz) / warp(cutoff);
+    let w = warped(f64::from(hz), f64::from(cutoff));
     let k = f64::from(damping);
     let denominator = ((1.0 - w * w).powi(2) + (k * w).powi(2)).sqrt();
     [1.0, w, w * w, (1.0 - w * w).abs()].map(|numerator| numerator / denominator)
 }
 
-/// Runs a sine through the filter until it settles, then measures the
-/// amplitude of each output at that frequency.
+/// Measures the amplitude of each output at `hz`.
 fn measure(hz: f32, cutoff: f32, damping: f32) -> [f64; 4] {
     let coefficients = Coefficients::new(cutoff, damping, SAMPLE_RATE);
-    let mut filter = Svf::new();
-    let step = std::f64::consts::TAU * f64::from(hz) / f64::from(SAMPLE_RATE);
-    let settle = 96_000;
-    let length = 48_000;
-    let mut sums = [(0.0f64, 0.0f64); 4];
-    for i in 0..settle + length {
-        let phase = step * i as f64;
-        let o = filter.tick(phase.sin() as f32, coefficients);
-        if i >= settle {
-            for (sum, value) in sums.iter_mut().zip([o.low, o.band, o.high, o.notch]) {
-                sum.0 += f64::from(value) * phase.sin();
-                sum.1 += f64::from(value) * phase.cos();
-            }
-        }
-    }
-    sums.map(|(a, b)| 2.0 * a.hypot(b) / f64::from(length))
+    let pick: [fn(Outputs) -> f32; 4] = [|o| o.low, |o| o.band, |o| o.high, |o| o.notch];
+    pick.map(|output| {
+        let mut filter = Svf::new();
+        tone_gain(f64::from(hz), 1.0, |x| output(filter.tick(x, coefficients)))
+    })
 }
 
 /// All four outputs match the analogue response under the bilinear transform,
