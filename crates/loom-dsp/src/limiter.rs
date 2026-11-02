@@ -17,8 +17,10 @@
 use std::collections::VecDeque;
 
 /// The running state of one stereo limiter. All memory is allocated in
-/// [`Limiter::new`], so neither `tick` nor `reset` allocates.
-#[derive(Debug, Clone)]
+/// [`Limiter::new`], so neither `tick` nor `reset` allocates. It is not
+/// `Clone`: a cloned `VecDeque` has room only for its current length, so the
+/// copy's next `tick` would allocate.
+#[derive(Debug)]
 pub struct Limiter {
     /// The highest peak allowed out.
     ceiling: f32,

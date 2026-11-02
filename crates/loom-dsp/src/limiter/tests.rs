@@ -93,3 +93,23 @@ fn reset_clears_the_state() {
     assert_eq!(limiter.tick(0.5, 0.5, true), (0.0, 0.0));
     assert_eq!(limiter.gain, 1.0);
 }
+
+/// The queues reach their fullest on falling peaks, when every sample stays in
+/// the sliding minimum, and `tick` still does not grow them, so it does not
+/// allocate. `reset` keeps the same capacity.
+#[test]
+fn ticks_and_reset_keep_the_capacity_from_new() {
+    let mut limiter = limiter();
+    let capacity = |l: &Limiter| (l.delay.capacity(), l.minimum.capacity(), l.window.capacity());
+    let start = capacity(&limiter);
+    let mut fullest = 0;
+    for i in 0..LOOKAHEAD * 4 {
+        let peak = 100.0 - i as f32 * 0.1;
+        limiter.tick(peak, -peak, true);
+        fullest = fullest.max(limiter.minimum.len());
+        assert_eq!(capacity(&limiter), start, "frame {i}");
+    }
+    assert_eq!(fullest, LOOKAHEAD + 1);
+    limiter.reset();
+    assert_eq!(capacity(&limiter), start);
+}
