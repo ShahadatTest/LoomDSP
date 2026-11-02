@@ -81,3 +81,14 @@ fn reset_returns_to_zero() {
     phasor.reset();
     assert_eq!(phasor, Phasor::new());
 }
+
+/// At the limit a wrap is still a jump of over half a cycle, which is how
+/// anything watching the ramp tells it from a step. At exactly half a cycle the
+/// phase would read 0, 0.5, 0, 0.5, and no jump would show.
+#[test]
+fn a_wrap_stays_visible_at_the_limit() {
+    let step = Phasor::step_for(1e9, RATE);
+    let mut phasor = Phasor::new();
+    let phases: Vec<f32> = (0..200).map(|_| phasor.tick(step)).collect();
+    assert!(phases.windows(2).any(|w| (w[1] - w[0]).abs() > 0.5));
+}

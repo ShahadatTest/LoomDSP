@@ -202,3 +202,14 @@ fn spectra_follow_the_colour() {
         assert!((slope - expected).abs() < 1.0, "{colour:?}: {slope} dB per octave");
     }
 }
+
+/// The generator is Marsaglia's xorshift32 with shifts 13, 17, and 5. A seed's
+/// numbers are part of what a patch sounds like, so they must not change. From
+/// a state of 1: `1 ^ (1 << 13)` is 8193, shifting right by 17 changes nothing,
+/// and `8193 ^ (8193 << 5)` is 270369.
+#[test]
+fn white_is_xorshift32() {
+    let mut state = 1;
+    next_white(&mut state);
+    assert_eq!(state, 270_369);
+}

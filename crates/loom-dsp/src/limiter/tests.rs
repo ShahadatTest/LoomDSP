@@ -129,6 +129,13 @@ fn copy_from_takes_the_whole_state() {
         assert_eq!(copy.tick(x, x), source.tick(x, x), "frame {i}");
     }
 
+    // Straight after a peak the output depends on the gain, as it recovers.
+    let mut source = limiter(Mode::Direct);
+    source.tick(4.0, 4.0);
+    let mut copy = limiter(Mode::Direct);
+    assert!(copy.copy_from(&source));
+    assert_eq!(copy.tick(0.1, 0.1), source.tick(0.1, 0.1));
+
     let mut other = Limiter::new(Settings {
         ceiling: 0.5,
         lookahead: LOOKAHEAD + 1,

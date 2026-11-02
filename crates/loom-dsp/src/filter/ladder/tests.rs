@@ -106,3 +106,21 @@ fn clearing_and_resetting() {
     assert_eq!(ladder.target(), Slope::Db12);
     assert_eq!(ladder.step_slope(), Slope::Db12.feedback_limit());
 }
+
+/// At full resonance the 18 and 24 dB slopes sing on their own, because their
+/// limits sit above where the loop starts to oscillate. An impulse is still
+/// ringing long after it. The 12 dB slope has no such point, so it dies away.
+#[test]
+fn full_resonance_sings_on_the_two_steep_slopes() {
+    for (slope, sings) in [(Slope::Db12, false), (Slope::Db18, true), (Slope::Db24, true)] {
+        let settings = coefficients(1_000.0, slope.feedback_limit());
+        let mut ladder = Ladder::new(RATE);
+        ladder.reset(slope);
+        ladder.tick(1.0, settings);
+        for _ in 0..96_000 {
+            ladder.tick(0.0, settings);
+        }
+        let peak = (0..960).map(|_| ladder.tick(0.0, settings).abs()).fold(0.0, f32::max);
+        assert_eq!(peak > 0.01, sings, "{slope:?}: peak {peak}");
+    }
+}

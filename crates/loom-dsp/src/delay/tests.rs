@@ -90,3 +90,15 @@ fn reset_and_copy() {
     line.reset();
     assert_eq!(line, DelayLine::new(0.01, RATE));
 }
+
+/// The shortest delay is one sample: the output is the input before this one.
+#[test]
+fn a_delay_of_one_sample_gives_the_previous_input() {
+    let mut line = DelayLine::new(0.01, RATE);
+    let mut previous = 0.0;
+    for i in 1..50 {
+        let x = i as f32;
+        assert_eq!(line.tick(x, 1.0), previous, "frame {i}");
+        previous = x;
+    }
+}
