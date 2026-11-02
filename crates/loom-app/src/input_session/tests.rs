@@ -366,8 +366,8 @@ fn a_stopped_output_reopens_quietly() {
 }
 
 /// With the command queue full the stream cannot reach the engine, so it is
-/// closed and tried again. There is no latch on this message: it repeats on
-/// each retry until the queue drains, and then the input opens.
+/// closed and tried again. The alert latches once (like other device errors)
+/// so retries do not overwrite a newer status message.
 #[test]
 fn a_full_queue_closes_the_new_stream_and_retries() {
     let mut bench = Bench::new(&["Mic"]);
@@ -380,7 +380,11 @@ fn a_full_queue_closes_the_new_stream_and_retries() {
 
     bench.alerts.say("newer");
     bench.sync();
-    assert!(bench.status().contains("queue is full"), "the message repeats");
+    assert_eq!(
+        bench.status(),
+        "newer",
+        "a latched full-queue alert must not overwrite a newer status"
+    );
 
     bench.drain_queue();
     bench.alerts.say("newer");
