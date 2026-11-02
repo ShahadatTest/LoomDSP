@@ -41,6 +41,7 @@ pub mod filter;
 pub mod limiter;
 pub mod noise;
 pub mod oscillator;
+pub mod phase;
 pub mod slew;
 
 mod static_checks;

@@ -10,7 +10,6 @@ use loom_core::{
 use loom_dsp::noise::Colour;
 use loom_dsp::{noise, oscillator};
 use loom_rt::Smoothed;
-use std::f32::consts::TAU;
 
 /// `loom.osc.sine`: sine of the phase input.
 pub static SINE: ModuleDescriptor = ModuleDescriptor {
@@ -51,7 +50,7 @@ impl Module for Sine {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
         let ([phase], [out]) = io.split::<1, 1>();
         for (out, &p) in out.iter_mut().zip(phase) {
-            *out = (TAU * (p - p.floor())).sin();
+            *out = oscillator::sine(p);
         }
     }
 }

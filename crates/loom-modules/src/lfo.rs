@@ -7,6 +7,7 @@ use loom_core::{
     PortSpec, ProcessContext, SignalType, Widget,
 };
 use loom_dsp::oscillator::SlowWave;
+use loom_dsp::phase::Phasor;
 use loom_rt::Smoothed;
 
 /// `loom.mod.lfo`: a slow periodic signal, free-running or locked to the
@@ -139,8 +140,8 @@ struct Lfo {
     cycles: f64,
     shape: u8,
     rate: Smoothed,
-    /// The free-running phase, kept in `f64` so it does not drift.
-    phase: f64,
+    /// The free-running phase.
+    phasor: Phasor,
 }
 
 impl Lfo {
@@ -156,7 +157,7 @@ impl Lfo {
             cycles: 1.0,
             shape: 0,
             rate: Smoothed::new(1.0, config.sample_rate, LFO.params[Self::RATE].options.smooth_seconds),
-            phase: 0.0,
+            phasor: Phasor::new(),
         }
     }
 
@@ -202,9 +203,8 @@ impl Module for Lfo {
                 if x.is_finite() { x - x.floor() } else { 0.0 }
             } else {
                 // The wave starts at phase 0, then the phase moves on.
-                let p = self.phase;
-                self.phase += rate / self.sample_rate;
-                self.phase -= self.phase.floor();
+                let p = self.phasor.phase();
+                self.phasor.advance(rate / self.sample_rate);
                 p
             };
             out[i] = Self::wave(shape, p);
@@ -229,7 +229,7 @@ impl Module for Lfo {
     }
 
     fn reset(&mut self) {
-        self.phase = 0.0;
+        self.phasor.reset();
         let target = self.rate.target();
         self.rate.reset(target);
     }

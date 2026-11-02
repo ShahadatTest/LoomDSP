@@ -38,25 +38,76 @@ fn corrections_are_zero_away_from_the_edge() {
     assert_eq!(poly_blamp(0.5, 0.01), 0.0);
 }
 
-/// A pulse stays in range when its width moves fast, even when the two edges
-/// overlap.
+/// Under audio-rate changes of width, the two edge corrections overlap, and the
+/// shared step in `pulse` keeps them bounded. This looks before the final limit,
+/// which would otherwise hide any fault here.
 #[test]
-fn pulse_stays_in_range_with_moving_width() {
-    let mut pulse = Pulse::new();
+fn pulse_overlap_stays_bounded_with_moving_width() {
+    let mut most = 0.0f32;
+    let (mut previous, mut previous_fall) = (0.0, 0.0);
     for i in 0..48_000 {
-        let phase = (i as f32 * 0.21).fract();
+        let t = (i as f32 * 0.21).fract();
         let width = 0.5 + 0.49 * (i as f32 * 0.37).sin();
-        let y = pulse.tick(phase, width);
-        assert!((-1.0..=1.0).contains(&y), "frame {i}: {y}");
+        let t_fall = wrap(t - width);
+        let dt = wrap(t - previous);
+        let dt_fall = wrap(t_fall - previous_fall);
+        (previous, previous_fall) = (t, t_fall);
+        let y = pulse_unclamped(t, width, dt.min(1.0 - dt), dt_fall.min(1.0 - dt_fall));
+        most = most.max(y.abs());
     }
+    assert!(most <= 1.0, "{most}");
 }
 
-/// A descending phase works as well as a rising one: a saw comes out reversed.
+/// A descending phase reads the ramp backward. This looks only away from the
+/// edge. The saw's edge is band limited for a rising phase only.
 #[test]
-fn descending_phase_runs_the_saw_backward() {
+fn descending_phase_reads_the_ramp_backward() {
     let mut saw = Saw::new();
     saw.tick(0.5);
     assert!((saw.tick(0.4) - -0.2).abs() < 1e-5);
+}
+
+/// Each struct gives what its function gives for the true step. The phases are
+/// exact in binary, so the step it works out is exact too.
+#[test]
+fn structs_match_their_functions() {
+    let step = 1.0 / 64.0;
+    let width = 0.25;
+    let (mut saw_tick, mut pulse_tick, mut triangle_tick) = (Saw::new(), Pulse::new(), Triangle::new());
+    pulse_tick.reset(width);
+    for i in 0..256 {
+        let t = (i % 64) as f32 * step;
+        let (s, p, tri) = (saw_tick.tick(t), pulse_tick.tick(t, width), triangle_tick.tick(t));
+        // The first frame has no earlier phase to compare with.
+        if i > 0 {
+            assert_eq!(s, saw(t, step), "saw frame {i}");
+            assert_eq!(p, pulse(t, width, step, step), "pulse frame {i}");
+            assert_eq!(tri, triangle(t, step), "triangle frame {i}");
+        }
+    }
+}
+
+/// A jump in the phase, as from a reset or a hard sync. The struct reads the
+/// jump as a step of over half a cycle, so it does not correct the new edge. The
+/// function knows the true step and does. This is why both layers exist.
+#[test]
+fn a_known_step_is_not_fooled_by_a_phase_jump() {
+    let (step, t) = (0.01, 0.005);
+    let mut inferred = Saw::new();
+    inferred.tick(0.3);
+    assert_eq!(inferred.tick(t), 2.0 * t - 1.0);
+    assert_eq!(saw(t, step), 2.0 * t - 1.0 - poly_blep(t, step));
+    assert_ne!(poly_blep(t, step), 0.0);
+}
+
+/// The sine crosses 0 going up at phase 0, peaks at a quarter, and wraps.
+#[test]
+fn the_sine_lines_up_with_its_phase() {
+    assert_eq!(sine(0.0), 0.0);
+    assert!((sine(0.25) - 1.0).abs() < 1e-6);
+    assert!((sine(0.75) + 1.0).abs() < 1e-6);
+    assert_eq!(sine(1.25), sine(0.25));
+    assert_eq!(sine(-0.75), sine(0.25));
 }
 
 /// Every slow wave crosses 0 going up at phase 0, except the square, which
