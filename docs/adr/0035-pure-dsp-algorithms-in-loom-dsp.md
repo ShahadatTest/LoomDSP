@@ -1,6 +1,6 @@
 # ADR-0035: Pure DSP algorithms live in `loom-dsp`, and modules wrap them
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-02
 - **Related requirements:** FR-SDK-01, FR-SDK-02, FR-SDK-06, NFR-PORT-02
 - **Related decisions:** ADR-0006 (dependency and licence policy), ADR-0017 (primitives and abstractions), ADR-0018 (clean room)
