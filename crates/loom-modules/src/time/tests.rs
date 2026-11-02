@@ -34,7 +34,7 @@ fn make_allpass(sample_rate: f32, time: f32, gain: f32) -> Box<dyn Module> {
 /// Checks that an integer delay shifts an impulse by the exact number of samples.
 #[test]
 fn integer_delay_shifts_an_impulse_by_exact_samples() {
-    let mut buf = DelayBuffer::new(0.1, 1_000.0);
+    let mut buf = DelayLine::new(0.1, 1_000.0);
     for i in 0..32 {
         let x = if i == 0 { 1.0 } else { 0.0 };
         let y = buf.step_delay(x, 10.0);
@@ -68,7 +68,7 @@ fn integer_delay_shifts_an_impulse_by_exact_samples() {
 fn fractional_catmull_rom_matches_the_cubic_formula_and_sweeps_smoothly_at_long_delays() {
     // On a linear ramp x[n] = n, Catmull-Rom reproduces the line exactly
     // once all four stencil points (k - 1 ..= k + 2) lie on the ramp.
-    let mut buf = DelayBuffer::new(0.1, 1_000.0);
+    let mut buf = DelayLine::new(0.1, 1_000.0);
     for n in 0..30 {
         let y = buf.step_delay(n as f32, 5.375);
         if n >= 8 {
@@ -82,7 +82,7 @@ fn fractional_catmull_rom_matches_the_cubic_formula_and_sweeps_smoothly_at_long_
     // changes the output on every frame rather than quantising into
     // 32-frame plateaus.
     let sample_rate = 192_000.0;
-    let mut long_buf = DelayBuffer::new(2.0, sample_rate);
+    let mut long_buf = DelayLine::new(2.0, sample_rate);
     let base_delay = 380_000usize;
     for n in 0..base_delay + 10 {
         let _ = long_buf.step_delay((n as f32 * 0.1).sin(), base_delay as f64);
@@ -181,8 +181,8 @@ fn clamps_limits_and_sanitizes_nan_and_infinity_on_time_input() {
 fn allpass_with_zero_gain_equals_delay_line_for_same_delay_in_samples() {
     // 1. Step level: identical `delay_samples >= 2.0`, including fractional
     // sweeps, -0.0, and quiet 1e-25 inputs below the 1e-20 feedback flush.
-    let mut delay_buf = DelayBuffer::new(0.2, 48_000.0);
-    let mut ap_buf = DelayBuffer::new(0.2, 48_000.0);
+    let mut delay_buf = DelayLine::new(0.2, 48_000.0);
+    let mut ap_buf = DelayLine::new(0.2, 48_000.0);
     for i in 0..500 {
         let x = match i {
             0 => -0.0,

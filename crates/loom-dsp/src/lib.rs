@@ -6,10 +6,11 @@
 //!
 //! Each algorithm states the input it accepts. It does not guard against
 //! values outside that range, and it does not smooth parameters: both belong
-//! to the caller. A `tick` never allocates, locks, or does I/O.
+//! to the caller. The exception is a guard inside a feedback path, where a
+//! caller cannot reach it. A `tick` never allocates, locks, or does I/O.
 //!
 //! ```
-//! use loom_dsp::svf::{Coefficients, Svf};
+//! use loom_dsp::filter::svf::{Coefficients, Svf};
 //!
 //! let coefficients = Coefficients::new(1_000.0, 1.0, 48_000.0);
 //! let mut filter = Svf::new();
@@ -17,4 +18,13 @@
 //! assert!(outputs.low.is_finite());
 //! ```
 
-pub mod svf;
+pub mod delay;
+pub mod envelope;
+pub mod filter;
+pub mod limiter;
+pub mod noise;
+pub mod oscillator;
+pub mod slew;
+
+#[cfg(test)]
+mod testing;

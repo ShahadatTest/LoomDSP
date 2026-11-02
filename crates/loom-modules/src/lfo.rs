@@ -6,8 +6,8 @@ use loom_core::{
     Channels, Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo,
     PortSpec, ProcessContext, SignalType, Widget,
 };
+use loom_dsp::oscillator::SlowWave;
 use loom_rt::Smoothed;
-use std::f64::consts::TAU;
 
 /// `loom.mod.lfo`: a slow periodic signal, free-running or locked to the
 /// transport.
@@ -160,24 +160,17 @@ impl Lfo {
         }
     }
 
-    /// The wave at phase `p` in `[0, 1)`. Every shape crosses 0 going up at
-    /// phase 0, so a sine and a triangle line up.
+    /// The wave at phase `p` in `[0, 1)`.
+    #[inline]
     fn wave(shape: u8, p: f64) -> f32 {
-        let fract = |x: f64| x - x.floor();
-        let value = match shape {
-            0 => (TAU * p).sin(),
-            1 => 1.0 - 4.0 * (fract(p + 0.25) - 0.5).abs(),
-            2 => 2.0 * fract(p + 0.5) - 1.0,
-            3 => -(2.0 * fract(p + 0.5) - 1.0),
-            _ => {
-                if p < 0.5 {
-                    1.0
-                } else {
-                    -1.0
-                }
-            }
+        let wave = match shape {
+            0 => SlowWave::Sine,
+            1 => SlowWave::Triangle,
+            2 => SlowWave::RampUp,
+            3 => SlowWave::RampDown,
+            _ => SlowWave::Square,
         };
-        value as f32
+        wave.value(p)
     }
 }
 

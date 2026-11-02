@@ -18,7 +18,7 @@ flowchart BT
     cli[loom-cli<br/>the loom tool]
     app[loom-app<br/>desktop app]
 
-    core --> rt
+    core --> rt & dsp
     modules --> core & dsp
     patch --> core
     test --> core

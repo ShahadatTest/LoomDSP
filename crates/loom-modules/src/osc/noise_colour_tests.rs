@@ -62,10 +62,11 @@ fn stereo_noise_streams_do_not_overlap() {
     left.restart(42);
     right.channel = 1;
     right.restart(42);
-    let streams = [left.state, left.aux, right.state, right.aux].map(|mut state| {
+    let ((left_white, left_aux), (right_white, right_aux)) = (left.generator.streams(), right.generator.streams());
+    let streams = [left_white, left_aux, right_white, right_aux].map(|mut state| {
         (0..128)
             .map(|_| {
-                Noise::next_white(&mut state);
+                noise::next_white(&mut state);
                 state
             })
             .collect::<std::collections::HashSet<_>>()

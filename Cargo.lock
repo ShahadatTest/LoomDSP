@@ -2094,6 +2094,7 @@ name = "loom-core"
 version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
+ "loom-dsp",
  "loom-rt",
  "rtrb",
  "thiserror 2.0.21",

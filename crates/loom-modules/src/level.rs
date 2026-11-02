@@ -542,11 +542,9 @@ pub static SLEW: ModuleDescriptor = ModuleDescriptor {
     ],
     role: ModuleRole::Dsp(|config| {
         Box::new(Slew {
-            sample_rate: config.sample_rate,
             rise: 0.05,
             fall: 0.05,
-            out: 0.0,
-            fresh: true,
+            slew: loom_dsp::slew::Slew::new(config.sample_rate),
         })
     }),
     panel: Panel::new(6, 3, &[Widget::knob(0, 0, "rise"), Widget::knob(3, 0, "fall")]),
@@ -562,12 +560,9 @@ pub static SLEW: ModuleDescriptor = ModuleDescriptor {
 /// is cast to `f32` only when it is written.
 #[derive(Clone)]
 struct Slew {
-    sample_rate: f32,
     rise: f32,
     fall: f32,
-    out: f64,
-    /// True until the first frame, which sets the output with no ramp.
-    fresh: bool,
+    slew: loom_dsp::slew::Slew,
 }
 
 impl Slew {
@@ -586,24 +581,11 @@ impl Module for Slew {
         let ([input], [out]) = io.split::<1, 1>();
         for (i, (out, &x)) in out.iter_mut().zip(input).enumerate() {
             if x.is_finite() {
-                if self.fresh {
-                    // A new slew must not sweep up from 0.
-                    self.out = f64::from(x);
-                    self.fresh = false;
-                } else {
-                    let rise = rise_mod.at_or(i, self.rise).max(SLEW.params[Self::RISE].min);
-                    let fall = fall_mod.at_or(i, self.fall).max(SLEW.params[Self::FALL].min);
-                    // Constant rate: 1.0 of change takes `rise` or `fall` seconds.
-                    let target = f64::from(x);
-                    let rate = f64::from(self.sample_rate);
-                    if target > self.out {
-                        self.out = (self.out + 1.0 / (f64::from(rise) * rate)).min(target);
-                    } else {
-                        self.out = (self.out - 1.0 / (f64::from(fall) * rate)).max(target);
-                    }
-                }
+                let rise = rise_mod.at_or(i, self.rise).max(SLEW.params[Self::RISE].min);
+                let fall = fall_mod.at_or(i, self.fall).max(SLEW.params[Self::FALL].min);
+                self.slew.tick(x, rise, fall);
             }
-            *out = self.out as f32;
+            *out = self.slew.value();
         }
     }
 
@@ -616,8 +598,7 @@ impl Module for Slew {
     }
 
     fn reset(&mut self) {
-        self.out = 0.0;
-        self.fresh = true;
+        self.slew.reset();
     }
 }
 
