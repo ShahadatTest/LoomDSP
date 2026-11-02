@@ -1,0 +1,15 @@
+[package]
+name = "loom-dsp"
+description = "Pure DSP algorithms from LoomDSP, with no ports, graph, or real-time host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme.workspace = true
+keywords = ["audio", "dsp", "filter"]
+categories = ["multimedia::audio"]
+
+[lints]
+workspace = true

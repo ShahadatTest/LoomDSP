@@ -5,6 +5,7 @@ use loom_core::{
     Channels, Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo,
     PortSpec, ProcessContext, SignalType, Widget,
 };
+use loom_dsp::svf;
 use loom_rt::Smoothed;
 use std::f32::consts::PI;
 
@@ -112,8 +113,7 @@ struct Svf {
     sample_rate: f32,
     cutoff: Smoothed,
     resonance: Smoothed,
-    ic1: f32,
-    ic2: f32,
+    filter: svf::Svf,
 }
 
 impl Svf {
@@ -135,8 +135,7 @@ impl Svf {
                 config.sample_rate,
                 SVF.params[Self::RESONANCE].options.smooth_seconds,
             ),
-            ic1: 0.0,
-            ic2: 0.0,
+            filter: svf::Svf::new(),
         }
     }
 }
@@ -164,26 +163,15 @@ impl Module for Svf {
             let cutoff_hz = if cutoff_hz.is_nan() { 1_000.0 } else { cutoff_hz }.clamp(5.0, nyquist_limit);
             let resonance = resonance_param.at_or(i, self.resonance.tick());
             // Resonance 0..1 maps to damping k = 2..0.02 (Q from 0.5 to 50).
-            let k = 2.0 - 1.98 * resonance;
-            let g = (PI * cutoff_hz / self.sample_rate).tan();
-            let a1 = 1.0 / (1.0 + g * (g + k));
-            let a2 = g * a1;
-            let a3 = g * a2;
+            let coefficients = svf::Coefficients::new(cutoff_hz, 2.0 - 1.98 * resonance, self.sample_rate);
 
             let x = input[i];
             let x = if x.is_finite() { x } else { 0.0 };
-            let v3 = x - self.ic2;
-            let v1 = a1 * self.ic1 + a2 * v3;
-            let v2 = self.ic2 + a2 * self.ic1 + a3 * v3;
-            self.ic1 = 2.0 * v1 - self.ic1;
-            self.ic2 = 2.0 * v2 - self.ic2;
-
-            lp[i] = v2;
-            bp[i] = v1;
-            hp[i] = x - k * v1 - v2;
-            // The notch is the lowpass plus the highpass: the bandpass terms
-            // cancel and `x - k * v1` is left. One addition, always in step.
-            notch[i] = lp[i] + hp[i];
+            let outputs = self.filter.tick(x, coefficients);
+            lp[i] = outputs.low;
+            bp[i] = outputs.band;
+            hp[i] = outputs.high;
+            notch[i] = outputs.notch;
         }
     }
 
@@ -208,8 +196,7 @@ impl Module for Svf {
     /// Clears the filter memory and snaps the smoothing to its targets
     /// (live patching spec, rule 7).
     fn reset(&mut self) {
-        self.ic1 = 0.0;
-        self.ic2 = 0.0;
+        self.filter.reset();
         let (cutoff, resonance) = (self.cutoff.target(), self.resonance.target());
         self.cutoff.reset(cutoff);
         self.resonance.reset(resonance);

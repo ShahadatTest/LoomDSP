@@ -86,7 +86,7 @@ For independent builds, run `scripts/setup-worktree-target.sh TARGET_ROOT` once 
 3. **Determinism.** Same patch and input give bit-identical output. Random sources must be seeded.
 4. **Licences.** Only permissive dependencies (ADR-0006). Never add GPL, LGPL, or AGPL code or crates. Check `deny.toml`.
 5. **Stable IDs.** Never rename a released module ID, port name, or parameter name. Patch files depend on them. Nothing is released during the early alpha, so a rename that improves the design is allowed; update every patch and test that uses the name in the same change.
-6. **Engine core stays portable.** `loom-core`, `loom-modules`, `loom-patch`, and `loom-rt` must build for `wasm32-unknown-unknown`: no threads, files, or audio APIs there.
+6. **Engine core stays portable.** `loom-core`, `loom-dsp`, `loom-modules`, `loom-patch`, and `loom-rt` must build for `wasm32-unknown-unknown`: no threads, files, or audio APIs there.
 7. **`unsafe` needs a `// SAFETY:` comment** that explains why it is sound.
 8. **Clean room** (ADR-0018). Design modules from first principles and published theory (textbooks, papers, standards). Do not read the source code of other audio projects, whatever their licence, except dependencies accepted under ADR-0006. Do not copy or closely paraphrase other products' manuals, and do not copy their panel layouts, control names, parameter sets, or presets. If you are asked to make a module "like" another product's, build it from its purpose and the theory, and cite your references in the pull request.
 
