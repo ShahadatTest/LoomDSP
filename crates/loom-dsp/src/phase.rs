@@ -47,6 +47,7 @@ impl Phasor {
     /// NaN, and the phase would then stay NaN for good. NaN gives a step of 0,
     /// so the phase stops.
     #[inline]
+    #[allow(clippy::manual_clamp)] // See the comment in the body.
     pub fn step_for(hz: f32, sample_rate: f32) -> f64 {
         let step = f64::from(hz) / f64::from(sample_rate);
         if step.is_nan() {
