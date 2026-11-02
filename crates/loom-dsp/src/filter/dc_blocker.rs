@@ -14,6 +14,7 @@ pub struct DcBlocker {
 impl DcBlocker {
     /// Creates a blocker with its corner near `cutoff_hz`. The cutoff must be
     /// far below half of `sample_rate`.
+    #[inline]
     pub fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
         Self {
             coefficient: (-TAU * cutoff_hz / sample_rate).exp(),
@@ -23,6 +24,7 @@ impl DcBlocker {
     }
 
     /// Clears the memory.
+    #[inline]
     pub fn reset(&mut self) {
         self.previous_in = 0.0;
         self.previous_out = 0.0;
@@ -31,6 +33,7 @@ impl DcBlocker {
     /// Processes one sample. `input` must be finite.
     #[inline]
     pub fn tick(&mut self, input: f32) -> f32 {
+        debug_assert!(input.is_finite(), "input {input}");
         // The difference first: added to a large held input, a small output
         // would round away and stop decaying.
         let mut output = self.coefficient * (self.previous_out + (input - self.previous_in));

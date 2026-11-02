@@ -13,5 +13,9 @@ use std::f32::consts::PI;
 /// `cutoff_hz` must be above 0 and below half of `sample_rate`.
 #[inline]
 pub fn prewarp(cutoff_hz: f32, sample_rate: f32) -> f32 {
+    debug_assert!(
+        cutoff_hz > 0.0 && cutoff_hz < sample_rate / 2.0,
+        "cutoff {cutoff_hz} Hz at {sample_rate} Hz"
+    );
     (PI * cutoff_hz / sample_rate).tan()
 }

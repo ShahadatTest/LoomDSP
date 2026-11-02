@@ -19,11 +19,13 @@ pub struct OnePole {
 
 impl OnePole {
     /// Creates a filter with cleared state.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Clears the filter's memory.
+    #[inline]
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -33,6 +35,7 @@ impl OnePole {
     /// [`OnePole::reset`].
     #[inline]
     pub fn tick(&mut self, input: f32, g: f32) -> Outputs {
+        debug_assert!(input.is_finite(), "input {input}");
         let v = (input - self.state) * g / (1.0 + g);
         let low = v + self.state;
         self.state = low + v;

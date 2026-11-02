@@ -59,6 +59,7 @@ pub struct Ladder {
 
 impl Ladder {
     /// Creates a cleared ladder at four stages.
+    #[inline]
     pub fn new(sample_rate: f32) -> Self {
         Self {
             target: 2,
@@ -74,6 +75,7 @@ impl Ladder {
     }
 
     /// Clears the loop and goes straight to `slope`, with no crossfade.
+    #[inline]
     pub fn reset(&mut self, slope: usize) {
         self.target = slope;
         self.weights = [0.0; 3];
@@ -86,6 +88,7 @@ impl Ladder {
 
     /// Clears only the stages and the saturation, so a bad value cannot stay
     /// in the loop. A slope change in progress goes on.
+    #[inline]
     pub fn clear_loop(&mut self) {
         self.state = [0.0; STAGES];
         self.saturation = 1.0;
@@ -99,6 +102,7 @@ impl Ladder {
 
     /// Starts a 10 ms crossfade from the current tap weights to `slope`.
     /// A change during a crossfade starts from where that one had got to.
+    #[inline]
     pub fn change_slope(&mut self, slope: usize) {
         self.target = slope;
         self.from = self.weights;
@@ -114,6 +118,7 @@ impl Ladder {
     /// waits. When it is higher, the crossfade runs first, at the old gain,
     /// and the gain then moves up. The gain never jumps, so the output
     /// never clicks.
+    #[inline]
     pub fn step_slope(&mut self) -> f32 {
         let wanted = self
             .weights
@@ -156,6 +161,7 @@ impl Ladder {
     /// secant slope is at most 1, so it only ever lowers the loop gain.
     #[inline]
     pub fn tick(&mut self, x: f32, g: f32, k: f32, gain: f32) -> f32 {
+        debug_assert!(x.is_finite(), "input {x}");
         let big_g = g / (1.0 + g);
         let carry = 1.0 / (1.0 + g);
         // The taps after stages 2, 3, and 4 as `a·u + b`.

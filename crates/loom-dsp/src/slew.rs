@@ -13,6 +13,7 @@ pub struct Slew {
 
 impl Slew {
     /// Creates a slew limiter whose first sample passes straight through.
+    #[inline]
     pub fn new(sample_rate: f32) -> Self {
         Self {
             sample_rate: f64::from(sample_rate),
@@ -22,6 +23,7 @@ impl Slew {
     }
 
     /// Back to the state of a new limiter.
+    #[inline]
     pub fn reset(&mut self) {
         self.out = 0.0;
         self.fresh = true;
@@ -37,6 +39,8 @@ impl Slew {
     /// `target` must be finite, and `rise` and `fall` must be above 0.
     #[inline]
     pub fn tick(&mut self, target: f32, rise: f32, fall: f32) -> f32 {
+        debug_assert!(target.is_finite(), "target {target}");
+        debug_assert!(rise > 0.0 && fall > 0.0, "rise {rise}, fall {fall}");
         let target = f64::from(target);
         if self.fresh {
             // A new slew must not sweep up from 0.

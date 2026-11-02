@@ -11,5 +11,8 @@ readme.workspace = true
 keywords = ["audio", "dsp", "filter"]
 categories = ["multimedia::audio"]
 
+[dev-dependencies]
+assert_no_alloc.workspace = true
+
 [lints]
 workspace = true

@@ -64,6 +64,7 @@ pub struct Noise {
 
 impl Noise {
     /// Creates a generator started from seed 1.
+    #[inline]
     pub fn new(sample_rate: f32) -> Self {
         let leak = (-TAU * BROWN_LEAK_HZ / sample_rate).exp();
         let mut noise = Self {
@@ -83,6 +84,7 @@ impl Noise {
     }
 
     /// Starts every stream again from `seed`, and clears the brown memory.
+    #[inline]
     pub fn restart(&mut self, seed: u32) {
         self.restart_keeping_brown(seed);
         self.brown = 0.0;
@@ -90,6 +92,7 @@ impl Noise {
 
     /// Starts the random streams again from `seed`, and keeps the brown
     /// memory, so a brown signal does not jump.
+    #[inline]
     pub fn restart_keeping_brown(&mut self, seed: u32) {
         self.state = seed.max(1);
         self.aux = (seed ^ 0x9E37_79B9).max(1);
@@ -102,6 +105,7 @@ impl Noise {
 
     /// Takes the sample rate settings and the brown memory of another
     /// generator, and nothing from its random streams.
+    #[inline]
     pub fn copy_brown_from(&mut self, other: &Self) {
         self.leak = other.leak;
         self.brown_gain = other.brown_gain;
@@ -109,6 +113,7 @@ impl Noise {
     }
 
     /// The white and pink stream states, so tests can look for overlap.
+    #[inline]
     pub fn streams(&self) -> (u32, u32) {
         (self.state, self.aux)
     }

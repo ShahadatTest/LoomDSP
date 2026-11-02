@@ -46,11 +46,13 @@ pub struct Saw {
 
 impl Saw {
     /// Creates a saw at phase 0.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Back to phase 0.
+    #[inline]
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -80,6 +82,7 @@ pub struct Pulse {
 }
 
 impl Default for Pulse {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -87,6 +90,7 @@ impl Default for Pulse {
 
 impl Pulse {
     /// Creates a pulse at phase 0, as if the width had been 0.5.
+    #[inline]
     pub fn new() -> Self {
         Self {
             previous: 0.0,
@@ -95,6 +99,7 @@ impl Pulse {
     }
 
     /// Back to phase 0 at `width`.
+    #[inline]
     pub fn reset(&mut self, width: f32) {
         self.previous = 0.0;
         self.previous_fall = 1.0 - width;
@@ -104,6 +109,7 @@ impl Pulse {
     /// below 1.
     #[inline]
     pub fn tick(&mut self, phase: f32, width: f32) -> f32 {
+        debug_assert!(width > 0.0 && width < 1.0, "width {width}");
         let t = phase - phase.floor();
         let mut dt = t - self.previous;
         dt -= dt.floor();
@@ -147,11 +153,13 @@ pub struct Triangle {
 
 impl Triangle {
     /// Creates a triangle at phase 0.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Back to phase 0.
+    #[inline]
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -197,6 +205,7 @@ impl SlowWave {
     /// The wave at phase `p` in 0 to 1.
     #[inline]
     pub fn value(self, p: f64) -> f32 {
+        debug_assert!((0.0..=1.0).contains(&p), "phase {p}");
         let fract = |x: f64| x - x.floor();
         let value = match self {
             Self::Sine => (TAU * p).sin(),

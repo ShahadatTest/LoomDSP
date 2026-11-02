@@ -71,6 +71,7 @@ pub struct Envelope {
 
 impl Envelope {
     /// Creates an idle envelope.
+    #[inline]
     pub fn new(sample_rate: f32) -> Self {
         Self {
             sample_rate: f64::from(sample_rate),
@@ -84,6 +85,7 @@ impl Envelope {
     }
 
     /// Back to idle at 0.
+    #[inline]
     pub fn reset(&mut self) {
         self.stage = Stage::Idle;
         self.level = 0.0;
@@ -126,6 +128,11 @@ impl Envelope {
             ad,
             power: k,
         } = settings;
+        debug_assert!((0.0..=1.0).contains(&sustain), "sustain {sustain}");
+        debug_assert!(
+            attack >= 0.0 && decay >= 0.0 && release >= 0.0,
+            "times {attack}, {decay}, {release}"
+        );
         if gate && !self.gate_was_high {
             // Retrigger from the current level: no click. The attack
             // still takes the full attack time.

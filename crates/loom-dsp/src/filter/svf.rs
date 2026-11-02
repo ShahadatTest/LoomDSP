@@ -26,6 +26,7 @@ impl Coefficients {
     /// must be above 0. It is `1 / Q`: 2 is a Q of 0.5, and small values ring.
     #[inline]
     pub fn new(cutoff_hz: f32, damping: f32, sample_rate: f32) -> Self {
+        debug_assert!(damping > 0.0, "damping {damping}");
         let g = prewarp(cutoff_hz, sample_rate);
         let a1 = 1.0 / (1.0 + g * (g + damping));
         let a2 = g * a1;
@@ -56,11 +57,13 @@ pub struct Svf {
 
 impl Svf {
     /// Creates a filter with cleared state.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Clears the filter's memory.
+    #[inline]
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -69,6 +72,7 @@ impl Svf {
     /// stay in the state until [`Svf::reset`].
     #[inline]
     pub fn tick(&mut self, input: f32, coefficients: Coefficients) -> Outputs {
+        debug_assert!(input.is_finite(), "input {input}");
         let Coefficients { damping, a1, a2, a3 } = coefficients;
         let v3 = input - self.ic2;
         let v1 = a1 * self.ic1 + a2 * v3;

@@ -16,6 +16,7 @@ pub struct DelayLine {
 impl DelayLine {
     /// Allocates a zeroed buffer for `max_seconds` at `sample_rate`, plus four
     /// guard samples for the 4-point cubic stencil.
+    #[inline]
     pub fn new(max_seconds: f32, sample_rate: f32) -> Self {
         let max_samples = (f64::from(max_seconds) * f64::from(sample_rate)).ceil().max(2.0) as usize;
         // Four extra frames so `k + 2` at `k == max_samples` stays in bounds
@@ -29,6 +30,7 @@ impl DelayLine {
 
     /// Copies `other` into this buffer, with no allocation. False when the
     /// two have different lengths.
+    #[inline]
     pub fn copy_from(&mut self, other: &Self) -> bool {
         if self.samples.len() != other.samples.len() {
             return false;
@@ -40,6 +42,7 @@ impl DelayLine {
     }
 
     /// Zeroes all buffered samples and resets the write index.
+    #[inline]
     pub fn clear(&mut self) {
         self.samples.fill(0.0);
         self.write = 0;
@@ -101,6 +104,7 @@ impl DelayLine {
     /// or a bad sample comes out again one delay time later.
     #[inline]
     pub fn step_delay(&mut self, input: f32, raw_samples: f64) -> f32 {
+        debug_assert!(input.is_finite(), "input {input}");
         let delay_samples = self.clamp_delay(raw_samples, 1.0);
         self.samples[self.write] = input;
         let out = self.read_catmull_rom(delay_samples);

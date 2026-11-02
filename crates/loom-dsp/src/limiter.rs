@@ -43,6 +43,7 @@ pub struct Limiter {
 
 impl Limiter {
     /// Creates a limiter. `release_seconds` is the time constant of recovery.
+    #[inline]
     pub fn new(ceiling: f32, lookahead: usize, release_seconds: f32, sample_rate: f32) -> Self {
         let mut limiter = Self {
             ceiling,
@@ -60,12 +61,14 @@ impl Limiter {
     }
 
     /// The lookahead in samples, which is also the latency when it is used.
+    #[inline]
     pub fn lookahead(&self) -> usize {
         self.lookahead
     }
 
     /// Back to unity gain and silence in the delay line. Keeps capacity, so
     /// it never allocates.
+    #[inline]
     pub fn reset(&mut self) {
         self.gain = 1.0;
         self.delay.clear();
@@ -81,6 +84,7 @@ impl Limiter {
     /// of `lookahead` between resets: the delay line runs only while it is on.
     #[inline]
     pub fn tick(&mut self, left: f32, right: f32, lookahead: bool) -> (f32, f32) {
+        debug_assert!(left.is_finite() && right.is_finite(), "input {left}, {right}");
         let peak = left.abs().max(right.abs());
         let needed = if peak > self.ceiling { self.ceiling / peak } else { 1.0 };
         let (target, left, right) = if lookahead {
