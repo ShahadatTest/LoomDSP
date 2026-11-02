@@ -31,7 +31,7 @@ flowchart BT
 | Crate | Job | Rules |
 |---|---|---|
 | `loom-rt` | Small real-time helpers: denormal flushing, parameter smoothing. | No dependencies on the rest. |
-| `loom-dsp` | Pure DSP algorithms with no ports or graph (ADR-0035). Modules wrap them. | No dependencies on the rest. Same real-time rules as `loom-core`. |
+| `loom-dsp` | Pure DSP algorithms with no ports or graph (ADR-0035, [spec](../design/dsp-algorithms.md)). Modules wrap them. | No dependency that reaches users, no `unsafe`, and no allocation after `new`, each enforced by a check. Same real-time rules as `loom-core`. |
 | `loom-core` | The `Module` trait, the editable `Graph`, the compiler, the `Engine` that runs on the audio thread, and the `Controller` that edits it. | Portable: builds for WebAssembly. No threads, files, or audio APIs. |
 | `loom-modules` | Every built-in module, plus integration tests and benchmarks. The `test-modules` feature adds `test_modules`, modules with IDs under `test.` for tests and `loom-app --test-modules`. | Same as `loom-core`. |
 | `loom-patch` | Loads, saves, and migrates patch files. | Same as `loom-core`. |

@@ -4,6 +4,16 @@
 //! Background: E. Catmull and R. Rom, "A Class of Local Interpolating Splines",
 //! 1974. M. R. Schroeder and B. F. Logan, "'Colorless' Artificial
 //! Reverberation", JAES 9, 1961.
+//!
+//! ```
+//! use loom_dsp::delay::DelayLine;
+//!
+//! let mut line = DelayLine::new(0.01, 48_000.0);
+//! line.tick(1.0, 2.0);
+//! line.tick(0.0, 2.0);
+//! // The first sample comes back two samples later.
+//! assert_eq!(line.tick(0.0, 2.0), 1.0);
+//! ```
 
 /// A circular buffer. Memory is allocated only in [`DelayLine::new`]. To take
 /// another line's state on the audio thread, use [`DelayLine::copy_from`]:

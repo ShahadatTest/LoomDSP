@@ -1,7 +1,23 @@
 //! An ADSR and AD envelope, with a bend on every stage.
 //!
 //! Each stage runs for its set time, whatever level it starts from, so a
-//! retrigger does not click and still takes the full attack time.
+//! retrigger does not click and still takes the full attack time. Built from
+//! first principles.
+//!
+//! ```
+//! use loom_dsp::envelope::{Envelope, Settings, power};
+//!
+//! let settings = Settings {
+//!     attack: 0.01,
+//!     decay: 0.1,
+//!     sustain: 0.5,
+//!     release: 0.2,
+//!     ad: false,
+//!     power: power(0.0),
+//! };
+//! let mut envelope = Envelope::new(48_000.0);
+//! assert!(envelope.tick(true, settings) > 0.0);
+//! ```
 
 /// The shaping power for `curve` from -1 to 1: `2^(3 × curve)`, from 1/8
 /// to 8.

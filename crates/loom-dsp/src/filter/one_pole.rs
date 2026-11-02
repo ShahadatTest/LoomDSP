@@ -1,6 +1,15 @@
 //! First-order filter with trapezoidal integration.
 //!
 //! Source: V. Zavalishin, "The Art of VA Filter Design".
+//!
+//! ```
+//! use loom_dsp::filter::one_pole::{Coefficients, OnePole};
+//!
+//! let coefficients = Coefficients::new(1_000.0, 48_000.0);
+//! let mut filter = OnePole::new();
+//! let outputs = filter.tick(0.5, coefficients);
+//! assert_eq!(outputs.low + outputs.high, 0.5);
+//! ```
 
 use super::prewarp;
 

@@ -13,6 +13,19 @@
 //! minimum is the monotonic-queue method: D. Lemire, "Streaming
 //! Maximum-Minimum Filter Using No More than Three Comparisons per Element",
 //! Nordic Journal of Computing, 2006.
+//!
+//! ```
+//! use loom_dsp::limiter::{Limiter, Mode, Settings};
+//!
+//! let mut limiter = Limiter::new(Settings {
+//!     ceiling: 0.9,
+//!     lookahead: 96,
+//!     release_seconds: 0.1,
+//!     sample_rate: 48_000.0,
+//! });
+//! limiter.set_mode(Mode::Direct);
+//! assert_eq!(limiter.tick(2.0, 1.0).0, 0.9);
+//! ```
 
 use std::collections::VecDeque;
 

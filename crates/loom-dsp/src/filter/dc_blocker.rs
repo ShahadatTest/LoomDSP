@@ -1,5 +1,18 @@
 //! A first-order high-pass filter that removes a constant offset:
-//! `y[n] = a * (y[n-1] + x[n] - x[n-1])`.
+//! `y[n] = a * (y[n-1] + x[n] - x[n-1])`. Built from first principles.
+//!
+//! It flushes very small outputs itself, because a held offset decays for ever.
+//!
+//! ```
+//! use loom_dsp::filter::dc_blocker::DcBlocker;
+//!
+//! let mut blocker = DcBlocker::new(5.0, 48_000.0);
+//! let mut last = 1.0;
+//! for _ in 0..48_000 {
+//!     last = blocker.tick(0.5);
+//! }
+//! assert!(last.abs() < 0.01);
+//! ```
 
 use std::f32::consts::TAU;
 

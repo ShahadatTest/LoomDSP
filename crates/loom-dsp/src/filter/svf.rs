@@ -6,6 +6,15 @@
 //! its cutoff moves at audio rate.
 //!
 //! Source: V. Zavalishin, "The Art of VA Filter Design".
+//!
+//! ```
+//! use loom_dsp::filter::svf::{Coefficients, Svf};
+//!
+//! let coefficients = Coefficients::new(1_000.0, 1.0, 48_000.0);
+//! let mut filter = Svf::new();
+//! let outputs = filter.tick(0.5, coefficients);
+//! assert!(outputs.low.is_finite());
+//! ```
 
 use super::prewarp;
 

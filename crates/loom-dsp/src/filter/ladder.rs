@@ -9,6 +9,22 @@
 //! - V. Zavalishin, "The Art of VA Filter Design": the trapezoidal one-pole
 //!   stage, the prewarped cutoff, and solving the feedback loop with no unit
 //!   delay in it (zero-delay feedback).
+//!
+//! ```
+//! use loom_dsp::filter::ladder::{Coefficients, Ladder, Settings, Slope};
+//!
+//! let mut ladder = Ladder::new(48_000.0);
+//! ladder.reset(Slope::Db18);
+//! // Call `step_slope` once per frame, as it runs any slope change.
+//! let feedback = 0.5 * ladder.step_slope();
+//! let coefficients = Coefficients::new(Settings {
+//!     cutoff_hz: 1_000.0,
+//!     feedback,
+//!     input_gain: 1.0,
+//!     sample_rate: 48_000.0,
+//! });
+//! assert!(ladder.tick(0.5, coefficients).is_finite());
+//! ```
 
 use super::prewarp;
 

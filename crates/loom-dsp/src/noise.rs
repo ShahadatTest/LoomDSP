@@ -11,6 +11,16 @@
 //! fluctuations", Scientific American, 1978). Brown noise is a leaky integral of white noise,
 //! so it cannot drift away. xorshift is from G. Marsaglia, "Xorshift RNGs",
 //! Journal of Statistical Software, 2003.
+//!
+//! ```
+//! use loom_dsp::noise::{Colour, Noise};
+//!
+//! let mut noise = Noise::new(48_000.0);
+//! noise.restart(42);
+//! let first = noise.tick(Colour::Pink);
+//! noise.restart(42);
+//! assert_eq!(noise.tick(Colour::Pink), first);
+//! ```
 
 use std::f32::consts::TAU;
 

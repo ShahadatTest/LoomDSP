@@ -1,4 +1,12 @@
-//! Filters.
+//! Filters. Each cutoff uses [`prewarp`], so it lands in the right place at any
+//! sample rate.
+//!
+//! ```
+//! use loom_dsp::filter::prewarp;
+//!
+//! // A quarter of the sample rate warps to exactly 1.
+//! assert!((prewarp(12_000.0, 48_000.0) - 1.0).abs() < 1e-6);
+//! ```
 
 pub mod dc_blocker;
 pub mod ladder;

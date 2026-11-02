@@ -1,5 +1,15 @@
 //! A slew limiter: limits how fast a signal can rise or fall, at a constant
-//! rate.
+//! rate. Built from first principles.
+//!
+//! ```
+//! use loom_dsp::slew::Slew;
+//!
+//! let mut slew = Slew::new(48_000.0);
+//! // The first sample passes straight through, then the output moves slowly.
+//! assert_eq!(slew.tick(0.0, 1.0, 1.0), 0.0);
+//! let moved = slew.tick(1.0, 1.0, 1.0);
+//! assert!(moved > 0.0 && moved < 0.001);
+//! ```
 
 /// The running state of one slew limiter. The output is kept in `f64`, so a
 /// very slow ramp does not stall when its step rounds away.
