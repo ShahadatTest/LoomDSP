@@ -12,10 +12,14 @@
 use loom_core::{LoomError, ModuleDescriptor, Registry};
 use std::sync::Arc;
 
+mod cached;
 pub mod clock;
 pub mod display;
+pub mod dynamics;
 pub mod env;
+pub mod eq;
 pub mod filter;
+pub mod gate;
 pub mod io;
 pub mod level;
 pub mod lfo;
@@ -26,6 +30,7 @@ pub mod mix;
 pub mod osc;
 pub mod phase;
 pub mod rand;
+pub mod route;
 #[cfg(feature = "test-modules")]
 pub mod test_modules;
 pub mod time;
@@ -39,6 +44,8 @@ pub static ALL: &[&ModuleDescriptor] = &[
     &phase::WRAP,
     &phase::SCALE,
     &phase::RESET,
+    &phase::SHIFT,
+    &phase::REVERSE,
     &lfo::LFO,
     &osc::SINE,
     &osc::SAW,
@@ -48,6 +55,9 @@ pub static ALL: &[&ModuleDescriptor] = &[
     &filter::SVF,
     &filter::ONEPOLE,
     &filter::LADDER,
+    &filter::CROSSOVER,
+    &eq::EQ,
+    &dynamics::DYNAMICS,
     &env::ENVELOPE,
     &math::ADD,
     &math::MUL,
@@ -64,6 +74,7 @@ pub static ALL: &[&ModuleDescriptor] = &[
     &mix::CROSSFADE,
     &mix::JOIN,
     &mix::SPLIT,
+    &route::SELECTOR,
     &io::UNIT_DELAY,
     &io::AUDIO_OUT,
     &io::AUDIO_IN,
@@ -73,6 +84,7 @@ pub static ALL: &[&ModuleDescriptor] = &[
     &display::SCOPE,
     &clock::CLOCK,
     &transport::TRANSPORT,
+    &gate::EUCLID,
     &logic::DIVIDE,
     &logic::COMPARE,
     &logic::LOGIC,
@@ -82,6 +94,7 @@ pub static ALL: &[&ModuleDescriptor] = &[
     &rand::RANDOM,
     &level::SLEW,
     &ui::BUTTON,
+    &ui::MACRO,
     &time::DELAY,
     &time::ALLPASS,
 ];

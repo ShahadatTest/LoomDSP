@@ -9,7 +9,7 @@ use iced::widget::{
     checkbox, column, container, mouse_area, pick_list, row, scrollable, slider, space, text, text_input,
 };
 use iced::{Element, Length, keyboard};
-use loom_core::{AssignmentId, Graph, ModuleId, OutputRef, WidgetKind};
+use loom_core::{AssignmentId, Graph, ModuleId, OutputRef};
 use serde::Serialize;
 use std::fmt;
 
@@ -302,16 +302,12 @@ pub fn targets(graph: &Graph) -> Vec<TargetPick> {
                 .enumerate()
                 .filter_map(move |(param, spec)| {
                     let eligible = !spec.options.transient
-                        && node.descriptor.panel.widgets.iter().any(|w| {
-                            w.bind == spec.name
-                                && matches!(
-                                    w.kind,
-                                    WidgetKind::Knob
-                                        | WidgetKind::Toggle
-                                        | WidgetKind::Radio
-                                        | WidgetKind::Segmented { .. }
-                                )
-                        });
+                        && node
+                            .descriptor
+                            .panel
+                            .widgets
+                            .iter()
+                            .any(|w| w.bind == spec.name && w.kind.takes_modulation());
                     eligible.then(|| TargetPick {
                         module,
                         param,
@@ -556,13 +552,20 @@ pub fn parse_depth(input: &str) -> Option<f32> {
     (percent.is_finite() && (-100.0..=100.0).contains(&percent)).then_some(percent / 100.0)
 }
 
+/// Focuses the depth field, then tells the app. A focus task sends no message,
+/// and the canvas must know a text field has the keys (panel-widgets.md, Keys
+/// in a text field).
+fn focus_depth_field() -> iced::Task<Message> {
+    iced::widget::operation::focus("matrix-depth").chain(crate::editing::text_focus().map(Message::TextFocus))
+}
+
 impl App {
     /// Handles a matrix event, and returns what the view must do after it:
     /// focus the depth field when an edit opens it, or scroll the selected
     /// card into view when the order or filter changes.
     pub(crate) fn matrix_message(&mut self, event: Event) -> iced::Task<Message> {
         let task = match event {
-            Event::Edit(_, Column::Depth) => iced::widget::operation::focus("matrix-depth"),
+            Event::Edit(_, Column::Depth) => focus_depth_field(),
             Event::SortBy(_) | Event::ReverseSort | Event::Filter(_) | Event::SelectedOnly(_) => reveal_selected(),
             _ => iced::Task::none(),
         };
@@ -588,7 +591,7 @@ impl App {
             iced::Task::none()
         };
         if open_depth && self.matrix.edit.as_ref().is_some_and(|e| e.column == Column::Depth) {
-            iced::Task::batch([scroll, iced::widget::operation::focus("matrix-depth")])
+            iced::Task::batch([scroll, focus_depth_field()])
         } else {
             scroll
         }
@@ -746,7 +749,7 @@ impl App {
             .assignments()
             .any(|(other, a)| other != id && a.source == source && a.target == module && a.param == param)
         {
-            self.alerts.say(format!(
+            self.alerts.warn(format!(
                 "{} already modulates {}",
                 modulation::source_name(self.controller.graph(), source),
                 modulation::target_name(self.controller.graph(), module, param)
@@ -759,7 +762,7 @@ impl App {
                 Ok(()) => {
                     app.commit();
                 }
-                Err(e) => app.alerts.say(format!("error: {e}")),
+                Err(e) => app.alerts.warn(e.to_string()),
             },
         );
         self.matrix.edit = None;
@@ -772,7 +775,7 @@ impl App {
             return;
         };
         let (Some(source), Some(target)) = (&add.source, &add.target) else {
-            self.alerts.say("Choose a source and a target".to_string());
+            self.alerts.warn("Choose a source and a target".to_string());
             return;
         };
         let (source, module, param) = (source.output, target.module, target.param);
@@ -794,7 +797,7 @@ impl App {
                     self.handle(Message::SliderReleased);
                     self.matrix.edit = None;
                 }
-                None => self.alerts.say("Depth must be between -100% and 100%".to_string()),
+                None => self.alerts.warn("Depth must be between -100% and 100%".to_string()),
             },
             Column::Source => {
                 if let Some(source) = sources(self.controller.graph()).get(edit.choice) {

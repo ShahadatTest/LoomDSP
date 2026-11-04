@@ -29,6 +29,15 @@ pub struct Preferences {
     /// The MIDI message that runs panic (panic.md, MIDI trigger). It
     /// belongs to the rig, so it is saved here and never in a patch.
     pub panic: Option<PanicPref>,
+    /// "Your name": the author added to new patches. Empty when unset
+    /// (patch-metadata.md, Defaults).
+    pub author: String,
+    /// The licence new patches start with, as an SPDX expression. `None`
+    /// is "No default": the app never picks a licence by itself (rule 7).
+    pub licence: Option<String>,
+    /// The library folder, where your patches browser looks. `None` is the
+    /// default, `LoomDSP/Library` in Documents.
+    pub library: Option<PathBuf>,
 }
 
 impl Default for Preferences {
@@ -39,7 +48,20 @@ impl Default for Preferences {
             audio: AudioPrefs::default(),
             midi: MidiPrefs::default(),
             panic: None,
+            author: String::new(),
+            licence: None,
+            library: None,
         }
+    }
+}
+
+impl Preferences {
+    /// The library folder: the saved one, or `LoomDSP/Library` in the
+    /// user's Documents folder. `None` when neither is known.
+    pub fn library_folder(&self) -> Option<PathBuf> {
+        self.library
+            .clone()
+            .or_else(|| crate::documents::folder().map(|docs| docs.join("LoomDSP").join("Library")))
     }
 }
 
@@ -225,6 +247,19 @@ fn parse(text: &str) -> Result<(Preferences, Vec<String>), String> {
                     preferences.midi.off = off;
                 }
             }
+            "author" => {
+                preferences.author = field(&mut notes, "author", &raw, &String::new(), |_| true);
+            }
+            "default_license" => {
+                preferences.licence = field(&mut notes, "default_license", &raw, &None, |l: &Option<String>| {
+                    l.as_deref().is_none_or(loom_patch::metadata::is_valid)
+                });
+            }
+            "library" => {
+                preferences.library = field(&mut notes, "library", &raw, &None, |p: &Option<PathBuf>| {
+                    p.as_deref().is_none_or(|p| !p.as_os_str().is_empty())
+                });
+            }
             other => notes.push(format!("Preferences: ignored unknown setting \"{other}\".")),
         }
     }
@@ -362,6 +397,9 @@ struct FileOut<'a> {
     audio: AudioOut<'a>,
     midi: &'a MidiPrefs,
     panic: Option<PanicPref>,
+    author: &'a str,
+    default_license: &'a Option<String>,
+    library: &'a Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -387,6 +425,9 @@ pub fn to_text(preferences: &Preferences) -> String {
         },
         midi: &preferences.midi,
         panic: preferences.panic,
+        author: &preferences.author,
+        default_license: &preferences.licence,
+        library: &preferences.library,
     };
     // Line feeds on every system, so the file is the same everywhere. RON
     // uses CRLF on Windows by default.
@@ -432,6 +473,11 @@ impl Store {
             saved: Preferences::default(),
             broken: false,
         }
+    }
+
+    /// The file this store reads and writes, if any.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// The saved values. When a write fails, they are still the values the

@@ -10,8 +10,10 @@ use crate::devices::{self, Host, MidiPort, Playing, Wanted};
 use crate::input_session::{Demand, InputSession};
 use crate::preferences::{AudioPrefs, BufferChoice, DeviceChoice, InputChoice, Preferences, RateChoice, Store};
 use crate::style::{self, button};
-use crate::{App, undo};
-use iced::widget::{checkbox, column, container, opaque, pick_list, radio, row, rule, scrollable, space, text};
+use crate::{App, alerts, undo};
+use iced::widget::{
+    checkbox, column, container, opaque, pick_list, radio, row, rule, scrollable, space, text, text_input,
+};
 use iced::{Element, Length};
 use loom_core::{EngineConfig, EngineParts, MidiInputId, OutputSafety, create_engine};
 use loom_host_desktop::{AudioOutput, MidiInputInfo, Outputs, Recorder, STOP_LIMIT, SharedMidi};
@@ -39,6 +41,12 @@ pub enum Message {
     PanicLearn,
     /// Remove the panic trigger.
     PanicClear,
+    /// The **Your name** field's text, not yet saved.
+    Author(String),
+    /// Save the **Your name** field: Enter, or closing the window.
+    SaveAuthor,
+    /// Open the licence chooser for the default licence.
+    ChooseLicence,
 }
 
 /// A change to one audio setting.
@@ -63,6 +71,9 @@ impl Change {
 pub struct Rig {
     pub host: Rc<dyn Host>,
     pub store: Store,
+    /// The recent patches and the last folder. It outlives each engine,
+    /// because every Open and New replaces the rest of the app.
+    pub recent: crate::recent::RecentList,
     /// Device flags for this run. A flag is cleared when the window changes
     /// its setting: the window's choice is newer.
     pub flags: devices::Options,
@@ -110,6 +121,8 @@ pub struct Rig {
 pub struct LostAudio {
     /// The device name that was lost.
     pub device: String,
+    /// What the app saw when it was lost, for the status bar.
+    pub reason: String,
     /// Whether the device was chosen as SystemDefault.
     pub was_system_default: bool,
     /// Number of consecutive reopen attempts that failed (0..10).
@@ -118,8 +131,6 @@ pub struct LostAudio {
     pub last_attempt: std::time::Instant,
     /// The error message if the last reopen attempt failed.
     pub last_error: Option<String>,
-    /// The message to keep in the status bar while audio is lost.
-    pub message: String,
 }
 
 /// The device lists the window shows.
@@ -127,14 +138,17 @@ pub struct Window {
     outputs: Result<Outputs, String>,
     inputs: Result<devices::Inputs, String>,
     midi: Result<Vec<String>, String>,
+    /// The **Your name** field as typed, saved on Enter or on close.
+    author: String,
 }
 
 impl Window {
-    fn read(host: &dyn Host) -> Self {
+    fn read(host: &dyn Host, author: String) -> Self {
         Self {
             outputs: host.outputs(),
             inputs: host.audio_inputs(),
             midi: host.midi_inputs(),
+            author,
         }
     }
 }
@@ -142,6 +156,7 @@ impl Window {
 impl Rig {
     pub fn new(host: Rc<dyn Host>, store: Store, flags: devices::Options, safety_flag: bool) -> Self {
         Self {
+            recent: crate::recent::RecentList::in_memory(),
             host,
             store,
             flags,
@@ -310,19 +325,34 @@ impl App {
     pub(crate) fn preferences(&mut self, message: Message) {
         match message {
             Message::Open => {
-                self.rig.window = Some(Window::read(&*self.rig.host));
+                let author = self.rig.store.saved().author.clone();
+                self.rig.window = Some(Window::read(&*self.rig.host, author));
                 self.browser = None;
             }
             Message::Close => {
+                self.save_author();
                 self.rig.window = None;
                 // Learning a panic trigger needs the window open to show
                 // "Waiting for MIDI...", so closing it cancels the learn.
                 self.rig.panic_learn = None;
             }
             Message::Refresh => {
-                if self.rig.window.is_some() {
-                    self.rig.window = Some(Window::read(&*self.rig.host));
+                if let Some(old) = self.rig.window.take() {
+                    self.rig.window = Some(Window::read(&*self.rig.host, old.author));
                 }
+            }
+            Message::Author(text) => {
+                if let Some(window) = &mut self.rig.window {
+                    window.author = text;
+                }
+            }
+            Message::SaveAuthor => self.save_author(),
+            Message::ChooseLicence => {
+                let current = self.rig.store.saved().licence.clone();
+                self.chooser = Some(crate::licence_chooser::Chooser::open(
+                    crate::licence_chooser::Target::Default,
+                    current.as_deref(),
+                ));
             }
             Message::Safety(mode) => self.choose_output_safety(mode),
             Message::Activity(on) => self.choose_activity(on),
@@ -356,7 +386,7 @@ impl App {
         let window = match &self.rig.window {
             Some(window) => window,
             None => {
-                read = Window::read(&*self.rig.host);
+                read = Window::read(&*self.rig.host, String::new());
                 &read
             }
         };
@@ -416,7 +446,8 @@ impl App {
         if self.rig.window.is_some() {
             return false;
         }
-        self.rig.window = Some(Window::read(&*self.rig.host));
+        let author = self.rig.store.saved().author.clone();
+        self.rig.window = Some(Window::read(&*self.rig.host, author));
         true
     }
 
@@ -461,13 +492,41 @@ impl App {
         let mut preferences = self.rig.store.saved().clone();
         preferences.output_safety = mode;
         if let Some(error) = self.rig.save(preferences) {
-            self.alerts.say(error);
+            self.alerts.warn(error);
         }
         // With no device there is no engine playing to tell. The next
         // engine is built with the new mode.
         if self.stream.is_playing() {
             self.rig.safety_pending = Some(mode);
             self.send_pending_safety();
+        }
+    }
+
+    /// Saves the **Your name** field, trimmed, when it changed
+    /// (patch-metadata.md, Defaults). Only the name is stored, never other
+    /// contact details (rule 4).
+    fn save_author(&mut self) {
+        let Some(window) = &self.rig.window else { return };
+        let author = window.author.trim().to_string();
+        if self.rig.store.saved().author == author {
+            return;
+        }
+        let mut preferences = self.rig.store.saved().clone();
+        preferences.author = author;
+        if let Some(error) = self.rig.save(preferences) {
+            self.alerts.warn(error);
+        }
+    }
+
+    /// Saves the default licence for new patches, or "No default".
+    pub(crate) fn set_default_licence(&mut self, licence: Option<String>) {
+        if self.rig.store.saved().licence == licence {
+            return;
+        }
+        let mut preferences = self.rig.store.saved().clone();
+        preferences.licence = licence;
+        if let Some(error) = self.rig.save(preferences) {
+            self.alerts.warn(error);
         }
     }
 
@@ -479,13 +538,13 @@ impl App {
         let mut preferences = self.rig.store.saved().clone();
         preferences.show_activity = on;
         if let Some(error) = self.rig.save(preferences) {
-            self.alerts.say(error);
+            self.alerts.warn(error);
         }
         self.live.set_activity(on);
         self.carrying.clear();
         self.sync_live();
         if let Err(error) = self.controller.commit() {
-            self.alerts.say(format!("error: {error}"));
+            self.alerts.warn(error.to_string());
         }
     }
 
@@ -547,10 +606,10 @@ impl App {
         let mut preferences = self.rig.store.saved().clone();
         preferences.audio.input = choice;
         let error = self.rig.save(preferences);
-        self.rig.input.choose(&mut self.controller);
+        self.rig.input.choose(&mut self.controller, &mut self.alerts);
         self.sync_audio_input();
         if let Some(error) = error {
-            self.alerts.say(error);
+            self.alerts.warn(error);
         }
     }
 
@@ -594,17 +653,17 @@ impl App {
             let output = match devices::open_choice(&*self.rig.host, &play) {
                 Ok(output) => output,
                 Err(e) => {
-                    self.alerts.say(self.could_not_use(&play, &e));
+                    self.alerts.warn(self.could_not_use(&play, &e));
                     return;
                 }
             };
             if let Err(e) = self.restart_audio(output) {
-                self.alerts.say(e);
+                self.alerts.warn(e);
                 return;
             }
-            self.rig.lost_audio = None;
+            self.audio_back();
         } else {
-            self.rig.lost_audio = None;
+            self.audio_back();
         }
         match change {
             Change::Device(_) => self.rig.flags.device = None,
@@ -614,7 +673,7 @@ impl App {
         // The flags that are left still set this run; what is saved is the
         // player's choice.
         if let Some(error) = self.rig.save(saved) {
-            self.alerts.say(error);
+            self.alerts.warn(error);
         }
     }
 
@@ -808,7 +867,7 @@ impl App {
         self.refresh_values();
         // After the commit, which sets the status line too.
         if let Some(error) = record_error {
-            self.alerts.say(error);
+            self.alerts.warn(error);
         }
         Ok(())
     }
@@ -830,6 +889,9 @@ impl App {
     /// was lost or disconnected (device-changes.md, Audio device loss).
     pub(crate) fn stop_audio_immediate(&mut self) {
         self.alerts.set_input_drift(None);
+        // A new stream gets a new watcher, and a clean first read sends
+        // nothing, so nothing else would turn these off.
+        self.alerts.set_output_warnings(false, false);
         if let Some(audio) = self.stream.take_running() {
             audio.stop_immediate();
         }
@@ -838,7 +900,7 @@ impl App {
     }
 
     /// Handles loss of the active audio output (device-changes.md, Audio device loss).
-    pub(crate) fn handle_audio_loss(&mut self, _reason: &str) {
+    pub(crate) fn handle_audio_loss(&mut self, reason: &str) {
         // Rule 3: The engine is never rebuilt twice for one loss. A second error
         // from the same dead stream is ignored.
         if !self.stream.is_playing() && self.rig.lost_audio.is_some() {
@@ -878,39 +940,59 @@ impl App {
                 if let Ok(output) = self.rig.host.open(&options)
                     && self.restart_audio(output).is_ok()
                 {
-                    self.alerts.say(format!(
-                        "Audio: \"{old_name}\" was lost. Now playing on \"{new_default}\"."
+                    self.audio_back();
+                    self.alerts.warn(format!(
+                        "Audio: \"{old_name}\" was lost: {reason}. Now playing on \"{new_default}\"."
                     ));
-                    self.rig.lost_audio = None;
                     switched = true;
                 }
             }
             if !switched {
-                let message = format!("Audio: \"{old_name}\" was lost.");
-                self.alerts.say(message.clone());
-                self.rig.lost_audio = Some(LostAudio {
-                    device: old_name,
-                    was_system_default: true,
-                    attempts: 0,
-                    last_attempt: Instant::now(),
-                    last_error: None,
+                let message = format!("Audio: \"{old_name}\" was lost: {reason}.");
+                self.audio_lost(
+                    LostAudio {
+                        device: old_name,
+                        reason: reason.to_string(),
+                        was_system_default: true,
+                        attempts: 0,
+                        last_attempt: Instant::now(),
+                        last_error: None,
+                    },
                     message,
-                });
+                );
             }
         } else {
             // Named device: plays nothing, keeps engine idle
-            let message =
-                format!("Audio: \"{old_name}\" was lost. Plug it in again, or choose another device in Preferences.");
-            self.alerts.say(message.clone());
-            self.rig.lost_audio = Some(LostAudio {
-                device: old_name,
-                was_system_default: false,
-                attempts: 0,
-                last_attempt: Instant::now(),
-                last_error: None,
+            let message = format!(
+                "Audio: \"{old_name}\" was lost: {reason}. Plug it in again, or choose another device in Preferences."
+            );
+            self.audio_lost(
+                LostAudio {
+                    device: old_name,
+                    reason: reason.to_string(),
+                    was_system_default: false,
+                    attempts: 0,
+                    last_attempt: Instant::now(),
+                    last_error: None,
+                },
                 message,
-            });
+            );
         }
+    }
+
+    /// The output is lost: the app remembers it and keeps the message on
+    /// screen. This and [`Self::audio_back`] are the only ways in and out, so
+    /// the two cannot disagree. The retries in `check_audio` take the record
+    /// out and put it back, which changes nothing the player sees.
+    fn audio_lost(&mut self, lost: LostAudio, message: String) {
+        self.alerts.error(alerts::Cause::AudioOutput, message);
+        self.rig.lost_audio = Some(lost);
+    }
+
+    /// Sound plays again, or the player chose a device.
+    pub(crate) fn audio_back(&mut self) {
+        self.rig.lost_audio = None;
+        self.alerts.clear(alerts::Cause::AudioOutput);
     }
 
     /// Checks for audio device loss, silent stalls, and device reconnection
@@ -974,7 +1056,7 @@ impl App {
                     && let Ok(outputs) = self.rig.host.outputs()
                     && !outputs.devices.iter().any(|d| d.name == device_name)
                 {
-                    self.handle_audio_loss(&format!("\"{device_name}\" was unplugged"));
+                    self.handle_audio_loss("it was unplugged");
                     return;
                 }
             }
@@ -1001,11 +1083,11 @@ impl App {
                         match self.rig.host.open(&options) {
                             Ok(output) => match self.restart_audio(output) {
                                 Ok(()) => {
-                                    self.alerts.say(format!(
-                                        "Audio: \"{}\" was lost. Now playing on \"{new_default}\".",
-                                        lost.device
+                                    self.audio_back();
+                                    self.alerts.warn(format!(
+                                        "Audio: \"{}\" was lost: {}. Now playing on \"{new_default}\".",
+                                        lost.device, lost.reason
                                     ));
-                                    self.rig.lost_audio = None;
                                     return;
                                 }
                                 Err(e) => {
@@ -1026,8 +1108,7 @@ impl App {
                             "Audio: could not reopen \"{}\": {reason}. Choose a device in Preferences.",
                             lost.device
                         );
-                        self.alerts.say(message.clone());
-                        lost.message = message;
+                        self.alerts.error(alerts::Cause::AudioOutput, message);
                     }
                 }
             }
@@ -1044,8 +1125,8 @@ impl App {
                     match devices::open_choice(&*self.rig.host, &saved) {
                         Ok(output) => match self.restart_audio(output) {
                             Ok(()) => {
+                                self.audio_back();
                                 self.alerts.say(format!("Audio: \"{}\" is back.", lost.device));
-                                self.rig.lost_audio = None;
                                 return;
                             }
                             Err(e) => {
@@ -1065,8 +1146,7 @@ impl App {
                             "Audio: could not reopen \"{}\": {reason}. Choose a device in Preferences.",
                             lost.device
                         );
-                        self.alerts.say(message.clone());
-                        lost.message = message;
+                        self.alerts.error(alerts::Cause::AudioOutput, message);
                     }
                 }
             }
@@ -1079,6 +1159,9 @@ impl App {
     /// longer for large buffers; output safety, rule 14). Used by Open, New, quit, and device changes.
     pub(crate) fn stop_audio(&mut self) {
         self.alerts.set_input_drift(None);
+        // A new stream gets a new watcher, and a clean first read sends
+        // nothing, so nothing else would turn these off.
+        self.alerts.set_output_warnings(false, false);
         if let Some(audio) = self.stream.take_running() {
             // A full queue cannot fade: the limit then stops the stream.
             let _ = self.controller.fade_out();
@@ -1200,7 +1283,7 @@ impl App {
             (true, Some(_)) | (false, None) => return,
             (true, None) => {
                 if let Err(e) = self.open_input(name) {
-                    self.alerts.say(format!("MIDI: {e}"));
+                    self.alerts.warn(format!("MIDI: {e}"));
                     return;
                 }
             }
@@ -1211,7 +1294,7 @@ impl App {
         let mut preferences = self.rig.store.saved().clone();
         preferences.midi.set(name, on);
         if let Some(error) = self.rig.save(preferences) {
-            self.alerts.say(error);
+            self.alerts.warn(error);
         }
     }
 
@@ -1282,6 +1365,37 @@ impl App {
         ]
         .spacing(6);
 
+        let licence = loom_patch::metadata::Licence::of(self.rig.store.saved().licence.as_deref());
+        let patches = column![
+            labelled(
+                "Your name",
+                text_input("Added as author of new patches", &window.author)
+                    .on_input(|t| crate::Message::Preferences(Message::Author(t)))
+                    .on_submit(crate::Message::Preferences(Message::SaveAuthor))
+                    .size(style::CONTROL)
+                    .into(),
+            ),
+            note("Only the name is added to patches you share. Add more by hand if you want to.".into()),
+            labelled(
+                "Licence",
+                row![
+                    text(match licence {
+                        loom_patch::metadata::Licence::None => "No default".to_string(),
+                        other => other.short(),
+                    })
+                    .size(style::CONTROL)
+                    .width(Length::Fill),
+                    button(text("Choose").size(style::CONTROL))
+                        .on_press(crate::Message::Preferences(Message::ChooseLicence)),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .into(),
+            ),
+            note("New patches start with this licence. You can change it for each patch.".into()),
+        ]
+        .spacing(6);
+
         let panel = column![
             row![
                 text("Preferences").size(style::TITLE),
@@ -1304,7 +1418,10 @@ impl App {
                     midi,
                     rule::horizontal(1),
                     heading("Panic"),
-                    panic
+                    panic,
+                    rule::horizontal(1),
+                    heading("New patches"),
+                    patches
                 ]
                 .spacing(12)
                 .padding([0, 12])

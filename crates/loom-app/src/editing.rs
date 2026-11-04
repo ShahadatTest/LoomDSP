@@ -1,12 +1,145 @@
 //! Edits and undo: grouping changes into undo steps, committing them to
 //! the engine, and the clipboard commands (`docs/design/undo.md`).
 
-use crate::{App, Message, browser, clipboard, undo};
+use crate::{App, Message, RightTab, alerts, browser, clipboard, undo};
+use iced::advanced::widget::operation::{self, Focusable, Outcome};
+use iced::advanced::widget::{Id, Operation};
 use iced::{Point, Task};
 use loom_core::{LoomError, ModuleId};
 use std::collections::BTreeSet;
 
+/// True when a text field or text box in the window has focus. Iced's
+/// text widgets have no undo of their own, so while one is being edited the
+/// undo shortcuts do nothing rather than change the patch behind it
+/// (undo.md, Gestures).
+pub(crate) fn text_field_focused() -> Task<bool> {
+    text_focus().map(|focus| focus.any)
+}
+
+/// Which text field has focus, as the widget tree knows it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TextFocus {
+    /// A text field or text box has focus.
+    pub any: bool,
+    /// The ID of the one that has it, if it has one.
+    pub field: Option<iced::advanced::widget::Id>,
+}
+
+/// Asks the widget tree which text field has focus. Iced's text fields do not
+/// say when focus moves, and a press can move it, so the app asks after the
+/// press has reached the widgets.
+pub(crate) fn text_focus() -> Task<TextFocus> {
+    use iced::advanced::widget::operation::{Focusable, Outcome};
+    use iced::advanced::widget::{Id, Operation};
+
+    /// Records the focused widget. Only text fields and text boxes are
+    /// focusable in this app.
+    struct Find(TextFocus);
+
+    impl Operation<TextFocus> for Find {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<TextFocus>)) {
+            operate(self);
+        }
+
+        fn focusable(&mut self, id: Option<&Id>, _bounds: iced::Rectangle, state: &mut dyn Focusable) {
+            if state.is_focused() {
+                self.0 = TextFocus {
+                    any: true,
+                    field: id.cloned(),
+                };
+            }
+        }
+
+        fn finish(&self) -> Outcome<TextFocus> {
+            Outcome::Some(self.0.clone())
+        }
+    }
+
+    iced::advanced::widget::operate(Find(TextFocus::default()))
+}
+
+/// Selects all the text in a field, so what is typed next replaces it.
+pub(crate) fn select_all_text(id: iced::advanced::widget::Id) -> Task<crate::Message> {
+    iced::advanced::widget::operate(iced::advanced::widget::operation::text_input::select_all(id))
+}
+
+/// Takes focus from every text field.
+pub(crate) fn unfocus_text_fields() -> Task<crate::Message> {
+    iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::focus(
+        iced::advanced::widget::Id::unique(),
+    ))
+}
+
+/// The field Tab moves to from `current`, wrapping at the ends, or `current`
+/// when it is not one of `fields`.
+pub(crate) fn field_after(fields: &[&'static str], current: Id, backwards: bool) -> Id {
+    let at = fields.iter().copied().position(|field| Id::new(field) == current);
+    match at {
+        Some(at) => {
+            let step = if backwards { fields.len() - 1 } else { 1 };
+            Id::new(fields[(at + step) % fields.len()])
+        }
+        None => current,
+    }
+}
+
+/// Moves focus to the next or previous of `fields`. With no named field in
+/// focus it changes nothing. Iced's own `focus_next` walks every field in the
+/// window, so it would go behind an open overlay (panels.md).
+pub(crate) struct StepFocus {
+    pub(crate) fields: &'static [&'static str],
+    pub(crate) backwards: bool,
+    pub(crate) current: Option<Id>,
+}
+
+impl Operation for StepFocus {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(&mut self, id: Option<&Id>, _bounds: iced::Rectangle, state: &mut dyn Focusable) {
+        if state.is_focused() {
+            self.current = id.cloned();
+        }
+    }
+
+    fn finish(&self) -> Outcome<()> {
+        match &self.current {
+            Some(current) => Outcome::Chain(Box::new(operation::focusable::focus(field_after(
+                self.fields,
+                current.clone(),
+                self.backwards,
+            )))),
+            None => Outcome::None,
+        }
+    }
+}
+
 impl App {
+    /// The text fields Tab moves between in the view on top now. None when
+    /// that view has fewer than two.
+    pub(crate) fn tab_fields(&self) -> &'static [&'static str] {
+        if self.patches.is_some() && self.chooser.is_none() {
+            &crate::patches::TEXT_FIELDS
+        } else if self.no_overlay() && self.matrix.tab == RightTab::Inspector && self.selection.is_empty() {
+            &crate::patch_info::TEXT_FIELDS
+        } else {
+            &[]
+        }
+    }
+
+    /// True when the focused text field is one Tab moves on from, to the next
+    /// field of its view. Any other field closes on Tab instead
+    /// (panel-widgets.md, Typing a value).
+    pub(crate) fn tab_moves_between_fields(&self) -> bool {
+        self.text_focus.field.as_ref().is_some_and(|focused| {
+            self.tab_fields()
+                .iter()
+                .copied()
+                .any(|field| Id::new(field) == *focused)
+        })
+    }
+
     /// Starts recording an edit: keeps the patch as it is now. Does nothing
     /// if one is already open, so a gesture's first call is the one that
     /// counts.
@@ -90,7 +223,7 @@ impl App {
         let verb = if forward { "Redo" } else { "Undo" };
         if let Err(why) = undo::check(&step, forward, &self.controller) {
             self.alerts
-                .say(format!("Cannot {} {}: {why}", verb.to_lowercase(), step.name()));
+                .warn(format!("Cannot {} {}: {why}", verb.to_lowercase(), step.name()));
             return;
         }
         // An armed parameter is a mode, not an edit: undo disarms it first.
@@ -124,16 +257,19 @@ impl App {
                 } else {
                     // The graph has the change but the engine does not. The
                     // history is already cleared by `commit`.
-                    self.alerts.say(format!(
-                        "{verb} could not reach the engine ({}); undo history cleared",
-                        self.alerts.status()
-                    ));
+                    self.alerts.error(
+                        alerts::Cause::Other,
+                        format!("{verb} could not reach the engine: {}", self.alerts.status()),
+                    );
                 }
             }
             Err(e) => {
                 self.edits.history.clear();
                 self.commit();
-                self.alerts.say(format!("{verb} failed ({e}); undo history cleared"));
+                self.alerts.error(
+                    alerts::Cause::Other,
+                    format!("{verb} failed ({e}); undo history cleared"),
+                );
             }
         }
     }
@@ -152,8 +288,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.retry_commit = matches!(&e, LoomError::QueueFull);
-                self.alerts.say(format!("error: {e}"));
+                self.commit_failed(&e);
                 // The controller stays dirty, so the next commit retries the
                 // change; until then the history cannot be trusted.
                 self.edits.committed(false);
@@ -163,6 +298,27 @@ impl App {
         self.sync_audio_input();
         self.refresh();
         sent
+    }
+
+    /// Says a commit failed, before the undo history is cleared. A full queue
+    /// drains and the commit is retried, so with no history to lose that is a
+    /// warning. Anything else stays true (the graph differs from what the
+    /// engine plays), and lost history stays lost after a retry works, so
+    /// those are kept.
+    pub(crate) fn commit_failed(&mut self, error: &LoomError) {
+        self.retry_commit = matches!(error, LoomError::QueueFull);
+        let history = &self.edits.history;
+        let lost_history = history.undo_step().is_some() || history.redo_step().is_some();
+        let message = if lost_history {
+            format!("{error}; undo history cleared")
+        } else {
+            error.to_string()
+        };
+        if self.retry_commit && !lost_history {
+            self.alerts.warn(message);
+        } else {
+            self.alerts.error(alerts::Cause::Other, message);
+        }
     }
 
     /// Removes modules and commits. Returns false if the commit failed; the
@@ -189,7 +345,12 @@ impl App {
         else {
             return None;
         };
-        if !modifiers.command() || self.browser.is_some() || self.probe_menu.is_some() || self.rig.window.is_some() {
+        if !modifiers.command()
+            || self.browser.is_some()
+            || self.probe_menu.is_some()
+            || self.rig.window.is_some()
+            || self.recent_rows.is_some()
+        {
             return None;
         }
         ['c', 'x', 'd']
@@ -217,7 +378,7 @@ impl App {
             clipboard::Group::from_selection(self.controller.graph(), &self.positions, &self.selection, incoming)
                 .with_sizes(&self.sizes);
         if group.is_empty() {
-            self.alerts.say(format!("Nothing selected to {verb}"));
+            self.alerts.warn(format!("Nothing selected to {verb}"));
             return None;
         }
         Some(group)
@@ -255,12 +416,12 @@ impl App {
             return;
         }
         let Some(text) = text else {
-            self.alerts.say(clipboard::NOTHING_TO_PASTE.to_string());
+            self.alerts.warn(clipboard::NOTHING_TO_PASTE.to_string());
             return;
         };
         match clipboard::Group::from_text(&text, self.controller.registry()) {
             Ok(group) => self.add_group(&group, browser::snap(world), "paste", "Pasted"),
-            Err(why) => self.alerts.say(why),
+            Err(why) => self.alerts.warn(why),
         }
     }
 
@@ -288,7 +449,7 @@ impl App {
     /// why.
     pub(crate) fn add_group(&mut self, group: &clipboard::Group, origin: Point, verb: &str, done: &str) {
         if let Err(why) = group.check(&self.controller) {
-            self.alerts.say(format!("Cannot {verb}: {why}"));
+            self.alerts.warn(format!("Cannot {verb}: {why}"));
             return;
         }
         self.step_name = Some(format!("{verb} {}", group.describe()));
@@ -304,7 +465,7 @@ impl App {
                 // The rollback freed the new modules' slots. Only a commit
                 // hands them back, so the next paste has room.
                 app.commit();
-                app.alerts.say(format!("Cannot {verb}: {e}"));
+                app.alerts.warn(format!("Cannot {verb}: {e}"));
             }
         });
         // `record` clears it, but an edit inside a gesture does not record.

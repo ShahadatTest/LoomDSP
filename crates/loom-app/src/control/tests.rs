@@ -39,7 +39,7 @@ fn parses_commands_and_rejects_unknown_ones() {
 #[test]
 fn file_shortcuts_are_refused() {
     let cmd = keyboard::Modifiers::COMMAND;
-    for c in ["n", "o", "s"] {
+    for c in ["o", "s"] {
         let key = keyboard::Key::Character(c.into());
         assert!(refuse_dialog_keys(&key, cmd).is_err(), "{c}");
         assert!(
@@ -594,7 +594,7 @@ fn toolbar_refuses_dialogs_disabled_buttons_and_unknown_names() {
     // No audio: Hold note is disabled. Nothing done yet: nor are Undo
     // and Redo.
     let mut app = App::new(crate::tests::app_args());
-    for name in ["new", "open", "save", "save-as"] {
+    for name in ["open", "save", "save-as"] {
         let error = run(&mut app, &format!(r#"{{"cmd": "toolbar", "button": "{name}"}}"#)).unwrap_err();
         assert!(error.contains("opens a dialog"), "{name}: {error}");
     }
@@ -607,7 +607,10 @@ fn toolbar_refuses_dialogs_disabled_buttons_and_unknown_names() {
         assert!(error.contains(reason), "{name}: {error}");
     }
     let error = run(&mut app, r#"{"cmd": "toolbar", "button": "MIDI learn"}"#).unwrap_err();
-    assert!(error.contains("buttons: learn, hold, panic, undo, redo"), "{error}");
+    assert!(
+        error.contains("buttons: new, learn, hold, panic, undo, redo"),
+        "{error}"
+    );
     let error = run(&mut app, r#"{"cmd": "toolbar", "button": "add"}"#).unwrap_err();
     assert!(error.contains("`add` command"), "{error}");
 }
@@ -1058,6 +1061,101 @@ fn keys_reach_the_open_browser_and_the_bar_draws_the_clock() {
     assert!(ui.app.browser.is_none(), "Escape closed the browser");
 }
 
+/// Runs a `type` command as the app does: the window reports whether a text
+/// field has focus, and then the keys go in, one frame at a time.
+fn run_type(ui: &mut crate::ui_test::Ui, text: &str) -> Answer {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let call = Call {
+        command: Command::Type { text: text.to_string() },
+        reply: Reply(Arc::new(Mutex::new(Some(sender)))),
+    };
+    let focused = ui.text_field_focused();
+    let _ = ui.app.update(Message::TypeFocus {
+        call,
+        text: text.to_string(),
+        focused,
+    });
+    for _ in 0..200 {
+        if let Ok(answer) = receiver.try_recv() {
+            return answer;
+        }
+        ui.redraw();
+        let _ = ui.app.update(Message::ControlFrame(Instant::now()));
+    }
+    receiver.try_recv().expect("answered after drawing")
+}
+
+/// An app with the script's pointer on, for typing tests.
+fn typing_ui() -> crate::ui_test::Ui {
+    let mut ui = crate::ui_test::Ui::open("subtractive.ron");
+    ui.app.pointer = crate::pointer::Pointer::new(true);
+    ui
+}
+
+/// Every character reaches the search field, so the list filters as a person
+/// typing would see it. One frame per character keeps them all.
+#[test]
+fn type_filters_the_open_browser() {
+    let mut ui = typing_ui();
+    let _ = ui.app.update(Message::OpenBrowser);
+    ui.redraw();
+    ui.focus(crate::browser::INPUT);
+    let before = ui.app.browser.as_ref().unwrap().results().len();
+
+    assert_eq!(run_type(&mut ui, "osc saw"), Ok(Map::new()));
+
+    let browser = ui.app.browser.as_ref().unwrap();
+    let names: Vec<&str> = browser.results().iter().map(|d| d.id).collect();
+    assert!(names.len() < before, "the list was filtered");
+    assert!(names.contains(&"loom.osc.saw"), "found {names:?}");
+}
+
+/// With no text field in focus nothing is typed. A letter would otherwise
+/// reach the shortcuts: `a` would open the browser.
+#[test]
+fn type_is_refused_with_no_text_field_in_focus() {
+    let mut ui = typing_ui();
+    let error = run_type(&mut ui, "a").unwrap_err();
+    assert!(error.contains("no text field has focus"), "{error}");
+    for _ in 0..4 {
+        ui.redraw();
+    }
+    assert!(ui.app.browser.is_none(), "no key reached the shortcuts");
+}
+
+/// An open question stops keys reaching the patch and its fields, so `type`
+/// says so and does not claim it worked.
+#[test]
+fn type_is_refused_while_a_question_is_open() {
+    let mut app = scripted_with_changes();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    assert!(app.question.is_some(), "the New button raised the question");
+    assert!(run(&mut app, r#"{"cmd": "type", "text": "a"}"#).is_err());
+}
+
+/// A `type` keeps case and spaces, and takes only text.
+#[test]
+fn typed_text_becomes_one_key_per_character() {
+    use iced::keyboard::{Event, Key, key::Named};
+    let events = resolve::type_events("A b").unwrap();
+    assert_eq!(events.len(), 6, "a press and a release per character");
+    let pressed: Vec<(Key, String)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::KeyPressed { key, text, .. } => Some((key.clone(), text.as_ref().unwrap().to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pressed[0], (Key::Character("A".into()), "A".to_string()));
+    assert_eq!(pressed[1], (Key::Named(Named::Space), " ".to_string()));
+    assert_eq!(pressed[2], (Key::Character("b".into()), "b".to_string()));
+
+    assert!(resolve::type_events("").is_err());
+    assert!(resolve::type_events("one\ntwo").unwrap_err().contains("use `key`"));
+    assert!(resolve::type_events(&"x".repeat(501)).is_err());
+    assert!(resolve::type_events(&"x".repeat(500)).is_ok());
+}
+
 /// Keys go through the view: Cmd+Z, which no widget takes, reaches the
 /// app and undoes, as from the keyboard.
 #[test]
@@ -1469,4 +1567,269 @@ fn open_and_save_failures_answer_with_the_reason() {
         Vec::new(),
         "no dialog while the channel is on"
     );
+}
+
+/// `key` sends a character's text, as a real keyboard does, so a script can
+/// type an exact value on a focused control (panel-widgets.md, Typing a value).
+#[test]
+fn a_script_types_an_exact_value() {
+    let mut ui = crate::ui_test::Ui::open("sine.ron");
+    let id = ui.app.controller.add_module("test.panel").unwrap();
+    ui.app.refresh();
+    ui.step(&[]);
+    let _ = ui.app.update(Message::SelectModule(id.0));
+    ui.redraw();
+    let target = format!("{}:cutoff", id.0);
+    run_ui(&mut ui, &format!(r#"{{"cmd": "hover", "target": "{target}"}}"#)).unwrap();
+    run_ui(&mut ui, r#"{"cmd": "press"}"#).unwrap();
+    run_ui(&mut ui, r#"{"cmd": "release"}"#).unwrap();
+    for key in ["4", "4", "0", "enter"] {
+        run_ui(&mut ui, &format!(r#"{{"cmd": "key", "key": "{key}"}}"#)).unwrap();
+    }
+    let node = ui.app.controller.graph().node(id).unwrap();
+    assert_eq!(node.params[node.descriptor.param_index("cutoff").unwrap()], 440.0);
+}
+
+/// An app with the control channel on and unsaved changes.
+fn scripted_with_changes() -> App {
+    let mut app = App::new(crate::tests::app_args());
+    app.control.push(Listener::Script(PathBuf::from("unused")));
+    app.edit(|app| {
+        app.controller.add_module("loom.osc.sine").unwrap();
+        app.commit();
+    });
+    assert!(app.unsaved());
+    app
+}
+
+/// Rule 9: the `new`, `open`, and `quit` commands never ask. They drop
+/// unsaved changes (S5).
+#[test]
+fn commands_never_raise_the_question() {
+    let mut app = scripted_with_changes();
+    run(&mut app, r#"{"cmd": "new"}"#).unwrap();
+    assert!(app.question.is_none());
+    assert!(!app.unsaved());
+
+    let mut app = scripted_with_changes();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/patches/sine.ron");
+    run(
+        &mut app,
+        &serde_json::json!({ "cmd": "open", "path": path }).to_string(),
+    )
+    .unwrap();
+    assert!(app.question.is_none());
+
+    let mut app = scripted_with_changes();
+    run(&mut app, r#"{"cmd": "quit"}"#).unwrap();
+    assert!(app.question.is_none());
+    assert!(app.quit);
+}
+
+/// A failed scripted `open` answers with the reason, and leaves no question
+/// that would block every later command.
+#[test]
+fn a_failed_open_leaves_no_question() {
+    let mut app = scripted_with_changes();
+    let line = serde_json::json!({ "cmd": "open", "path": "/nowhere/missing.ron" }).to_string();
+    let error = run(&mut app, &line).unwrap_err();
+    assert!(error.starts_with("Could not open the patch"), "{error}");
+    assert!(app.question.is_none());
+}
+
+/// Rule 9: the New button raises the question, the snapshot shows it, and a
+/// script can answer it by the buttons' names.
+#[test]
+fn a_script_can_raise_and_answer_the_question() {
+    let mut app = scripted_with_changes();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    let snapshot = run(&mut app, r#"{"cmd": "snapshot"}"#).unwrap();
+    let question = &snapshot["snapshot"]["question"];
+    assert_eq!(question["buttons"], serde_json::json!(["save", "dont-save", "cancel"]));
+    assert_eq!(question["highlight"], "save");
+    assert!(app.unsaved(), "it waits for the answer");
+
+    run(&mut app, r#"{"cmd": "toolbar", "button": "cancel"}"#).unwrap();
+    assert!(app.question.is_none());
+    assert!(app.unsaved(), "Cancel changes nothing");
+
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "dont-save"}"#).unwrap();
+    assert!(app.question.is_none());
+    assert!(!app.unsaved());
+}
+
+/// Rule 9: what an open question blocks is refused with an error, so a reply
+/// never says that something worked when nothing happened. Panic still works.
+#[test]
+fn what_a_question_blocks_is_refused() {
+    let mut app = scripted_with_changes();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    for line in [
+        r#"{"cmd": "toolbar", "button": "undo"}"#,
+        r#"{"cmd": "undo"}"#,
+        r#"{"cmd": "select", "modules": []}"#,
+        r#"{"cmd": "key", "key": "z", "modifiers": ["cmd"]}"#,
+    ] {
+        let error = run(&mut app, line).unwrap_err();
+        assert!(error.contains("a question is open"), "{line}: {error}");
+        assert!(error.contains("dont-save"), "{line}: {error}");
+    }
+    run(&mut app, r#"{"cmd": "panic"}"#).unwrap();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "panic"}"#).unwrap();
+    assert!(app.question.is_some());
+}
+
+/// Rule 9: answering Save on a patch with no file cannot open a native
+/// picker with nobody to close it. It stops, nothing is lost, and the reply
+/// says so, because the step after it did not run.
+#[test]
+fn a_scripted_save_answer_opens_no_picker() {
+    let mut app = scripted_with_changes();
+    let _ = crate::files::fake::asked();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    let error = run(&mut app, r#"{"cmd": "toolbar", "button": "save"}"#).unwrap_err();
+    assert!(error.contains("use the `save` command"), "{error}");
+    assert_eq!(error, app.alerts.status());
+    assert_eq!(crate::files::fake::asked(), Vec::new(), "no dialog");
+    assert!(app.unsaved(), "nothing is lost");
+    assert!(app.question.is_none());
+}
+
+/// An app with the control channel on and a file in a folder of its own, and
+/// that folder. Removing the folder makes the next write to the file fail.
+fn scripted_with_a_file(name: &str) -> (App, crate::recovery::tests::TempDir, PathBuf) {
+    let dir = crate::recovery::tests::TempDir::new(name);
+    let folder = dir.0.join("folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("mine.ron");
+    std::fs::write(&file, "Patch(version: 1)").unwrap();
+    let mut app = scripted_with_changes();
+    let line = serde_json::json!({ "cmd": "open", "path": file }).to_string();
+    run(&mut app, &line).unwrap();
+    app.edit(|app| {
+        app.controller.add_module("loom.osc.sine").unwrap();
+        app.commit();
+    });
+    (app, dir, folder)
+}
+
+/// A Save answer whose write fails replies with the reason. New does not run.
+#[test]
+fn a_failed_scripted_save_answer_is_an_error() {
+    let (mut app, _dir, folder) = scripted_with_a_file("control-answer-save");
+    std::fs::remove_dir_all(&folder).unwrap();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    let error = run(&mut app, r#"{"cmd": "toolbar", "button": "save"}"#).unwrap_err();
+    assert!(error.starts_with("Could not save"), "{error}");
+    assert_eq!(error, app.alerts.status());
+    assert!(app.unsaved());
+    assert!(app.document.file().is_some(), "New did not run");
+}
+
+/// A Replace answer whose write fails replies with the reason too, and its
+/// next step does not run.
+#[test]
+fn a_failed_scripted_replace_answer_is_an_error() {
+    use crate::question::{AfterDiscard, Question};
+    let (mut app, _dir, folder) = scripted_with_a_file("control-answer-replace");
+    let path = folder.join("mine.ron");
+    std::fs::remove_dir_all(&folder).unwrap();
+    app.question = Some(Question::replace(path, Some(AfterDiscard::Close)));
+    let error = run(&mut app, r#"{"cmd": "toolbar", "button": "replace"}"#).unwrap_err();
+    assert!(error.starts_with("Could not save"), "{error}");
+    assert!(!app.quit, "the next step did not run");
+    assert!(app.unsaved());
+}
+
+/// An answer that writes replies `ok`, and the next step runs.
+#[test]
+fn a_scripted_save_answer_that_writes_replies_ok() {
+    let (mut app, _dir, folder) = scripted_with_a_file("control-answer-ok");
+    run(&mut app, r#"{"cmd": "toolbar", "button": "new"}"#).unwrap();
+    run(&mut app, r#"{"cmd": "toolbar", "button": "save"}"#).unwrap();
+    assert_ne!(
+        std::fs::read_to_string(folder.join("mine.ron")).unwrap(),
+        "Patch(version: 1)"
+    );
+    assert_eq!(app.document.file(), None, "New ran");
+    assert!(!app.unsaved());
+}
+
+/// The Panic key works over a question from a script, as it does from a real
+/// keyboard, and so do the question's own keys. Other keys stay refused.
+#[test]
+fn a_scripted_panic_key_works_over_a_question() {
+    use crate::question::{AfterDiscard, Question};
+    let question = Question::discard("a".into(), AfterDiscard::New);
+    let cmd = keyboard::Modifiers::COMMAND;
+    let refused = |key: keyboard::Key, m| refuse_while_asking(Some(&question), &key, m).is_err();
+    assert!(!refused(keyboard::Key::Character(".".into()), cmd), "Panic");
+    assert!(!refused(
+        keyboard::Key::Named(keyboard::key::Named::Tab),
+        keyboard::Modifiers::default()
+    ));
+    assert!(refused(keyboard::Key::Character("z".into()), cmd));
+    assert!(refused(
+        keyboard::Key::Character(".".into()),
+        keyboard::Modifiers::default()
+    ));
+    // With no question open, nothing is refused here.
+    assert!(refuse_while_asking(None, &keyboard::Key::Character("z".into()), cmd).is_ok());
+}
+
+/// `open` works as File > Open does, so a patch that loads differently from
+/// how it was saved names its load notes in the status line.
+#[test]
+fn open_keeps_load_notes_in_the_status_line() {
+    let mut app = crate::tests::app();
+    let dir = std::env::temp_dir().join(format!("loom-control-open-note-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let noted = dir.join("noted.ron");
+    std::fs::write(
+        &noted,
+        r#"Patch(version: 1, modules: [(id: 1, kind: "loom.math.mul@1", params: {"gain": 5.0}, ranges: {"gain": (-0.1, 0.1)})])"#,
+    )
+    .unwrap();
+    let line = serde_json::json!({ "cmd": "open", "path": noted }).to_string();
+    run(&mut app, &line).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        app.alerts
+            .status()
+            .starts_with(&format!("opened {}: module 1", noted.display())),
+        "{}",
+        app.alerts.status()
+    );
+}
+
+/// The `audio` field says where the input stream is, as a script needs when
+/// it adds and removes an Audio In. Removing the last one is visible too.
+#[test]
+fn the_audio_field_reports_the_input_stream() {
+    use crate::devices::fake::{self, Fake};
+    let fake = std::rc::Rc::new(Fake::new(&[fake::device("Fake A")], &[]));
+    *fake.audio_inputs.borrow_mut() = crate::devices::Inputs {
+        default: Some("Fake Mic".into()),
+        devices: vec!["Fake Mic".into()],
+    };
+    let mut app = on_fake_devices("input-report", &fake);
+    let input = |app: &mut App| run(app, r#"{"cmd": "snapshot"}"#).unwrap()["audio"]["input"].clone();
+    assert_eq!(input(&mut app), json!({"device": null, "state": "off"}));
+
+    let module = app.controller.add_module("loom.io.audio-in").unwrap();
+    assert!(app.commit());
+    app.sync_audio_input();
+    assert_eq!(input(&mut app), json!({"device": "Fake Mic", "state": "open"}));
+
+    fake.input_permission_denied.set(true);
+    app.sync_audio_input();
+    assert_eq!(input(&mut app), json!({"device": null, "state": "denied"}));
+    fake.input_permission_denied.set(false);
+    app.sync_audio_input();
+
+    app.controller.remove_module(module).unwrap();
+    assert!(app.commit());
+    app.sync_audio_input();
+    assert_eq!(input(&mut app), json!({"device": null, "state": "off"}));
 }

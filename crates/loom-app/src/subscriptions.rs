@@ -162,17 +162,36 @@ impl App {
             };
             Subscription::run_with(watch, learn::stream).map(|_| Message::Midi)
         });
-        let keys = Some(iced::keyboard::listen().map(Message::Key));
+        // An open question has the keys, except Panic's. One key must not
+        // answer it and also reach what is behind it, once the answer has
+        // closed it (files.md, Asking before losing work).
+        let open = self.question.is_none();
+        let keys = open.then(|| iced::keyboard::listen().map(Message::Key));
         // The matrix owns arrows and Escape even when a child widget uses
         // the key. Its handler ignores them outside table focus.
-        let matrix_keys = (self.matrix.tab == RightTab::Matrix && self.matrix.focused)
+        let matrix_keys = (open && self.matrix.tab == RightTab::Matrix && self.matrix.focused)
             .then(|| iced::event::listen_with(matrix::key_listener));
         // The search field takes Escape for itself, so the browser listens
         // to keys whether or not a widget used them.
-        let browser = (self.browser.is_some() && self.help.is_none()).then(|| iced::event::listen_with(browser_key));
-        let help_keys = Some(iced::event::listen_with(help_key));
+        let browser =
+            (open && self.browser.is_some() && self.help.is_none()).then(|| iced::event::listen_with(browser_key));
+        let help_keys = open.then(|| iced::event::listen_with(help_key));
+        // A draft in a value field ends on Escape, and the app has to know
+        // when text focus may have moved (panel-widgets.md, Typing a value).
+        let text_focus = open.then(|| iced::event::listen_with(crate::controls::text_focus_event));
+        let value_draft =
+            (open && self.value_draft.is_some()).then(|| iced::event::listen_with(crate::controls::value_draft_event));
+        // The patches browser hears Up, Down, and Escape over its fields.
+        let patches_keys = (open && self.patches.is_some() && self.chooser.is_none())
+            .then(|| iced::event::listen_with(crate::patches::key));
+        let question_keys = (!open).then(|| iced::event::listen_with(crate::question::key));
         // The panic key works whatever has focus (panic.md).
         let panic = Some(iced::event::listen_with(panic::key));
+        // Files dropped on the window. The timer runs only while a drop is
+        // being collected, so an idle app stays idle.
+        let drops = Some(iced::event::listen_with(crate::recent::drop_event));
+        let drops_done = (!self.drops.is_empty())
+            .then(|| iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::DropsDone));
         Subscription::batch(
             watch
                 .into_iter()
@@ -180,7 +199,13 @@ impl App {
                 .chain(matrix_keys)
                 .chain(browser)
                 .chain(help_keys)
-                .chain(panic),
+                .chain(patches_keys)
+                .chain(value_draft)
+                .chain(text_focus)
+                .chain(question_keys)
+                .chain(panic)
+                .chain(drops)
+                .chain(drops_done),
         )
     }
 
@@ -197,24 +222,26 @@ impl App {
     /// there are none.
     pub(crate) fn watched_lights(&self) -> Option<lights::Watch> {
         let graph = self.controller.graph();
-        let watched: Vec<_> = self
+        let (lights, (ranges, readouts)): (Vec<_>, (Vec<_>, Vec<_>)) = self
             .visible_displays
             .iter()
             .filter_map(|&id| Some((id, graph.node(ModuleId(id))?.descriptor)))
             .flat_map(|(id, d)| {
                 d.panel.widgets.iter().enumerate().filter_map(move |(index, w)| {
                     let display = (!w.is_control()).then(|| d.display_index(w.bind))??;
-                    Some(((id, index), display))
+                    Some(((id, index), display, lights::range(d, w), lights::readout(d, w)))
                 })
             })
-            .filter_map(|(light, display)| {
+            .filter_map(|(light, display, range, readout)| {
                 let source = self.controller.display_source(ModuleId(light.0), display)?;
-                Some((light, source))
+                Some(((light, source), (range, readout)))
             })
-            .collect();
-        (!watched.is_empty()).then(|| lights::Watch {
+            .unzip();
+        (!lights.is_empty()).then(|| lights::Watch {
             reader: self.controller.display_reader(),
-            lights: watched,
+            readouts,
+            lights,
+            ranges,
             generation: self.generation,
         })
     }

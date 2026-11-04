@@ -14,14 +14,16 @@ pub const EXTENSION: &str = "ron";
 /// when macOS runs the app from a translocated copy.
 const BUNDLED_MARKER: &str = ".loomdsp-bundled-examples";
 
-/// What the user chose when asked about unsaved changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Choice {
-    Save,
-    DontSave,
-    Cancel,
-    /// No dialog could be shown (Linux without `zenity` or `kdialog`).
-    Unavailable,
+/// What came of asking where to save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Saving {
+    /// The dialog was cancelled.
+    Cancelled,
+    /// Save here. The dialog confirmed the name if it had to.
+    Chosen(PathBuf),
+    /// Save here only if the player agrees: adding the extension made the
+    /// name of another file, which the dialog did not ask about.
+    Confirm(PathBuf),
 }
 
 /// The name shown for a patch: its file name, or "Untitled" before it has one.
@@ -29,6 +31,36 @@ pub fn display_name(file: Option<&Path>) -> String {
     file.and_then(Path::file_name)
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled".to_string())
+}
+
+/// A file name made from a patch name: characters that file systems refuse
+/// are dropped, and the ends are trimmed of spaces and dots. "Untitled"
+/// when nothing is left. No extension.
+pub fn file_stem(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let stem = stem.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if stem.is_empty() {
+        "Untitled".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// A patch file in `dir` named after `name` that does not exist yet:
+/// `Name.ron`, else `Name 2.ron`, `Name 3.ron`, and so on. Save As
+/// suggests it, so a second new patch does not meet the replace question.
+pub fn free_path(dir: &Path, name: &str) -> PathBuf {
+    let stem = file_stem(name);
+    let mut path = dir.join(format!("{stem}.{EXTENSION}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem} {n}.{EXTENSION}"));
+        n += 1;
+    }
+    path
 }
 
 /// The window title for a patch shown under `name`: `* name - LoomDSP`
@@ -99,95 +131,102 @@ pub fn is_example(path: &Path, examples: Option<&Path>) -> bool {
         .any(|dir| dir.ends_with("examples/patches") && dir.join(BUNDLED_MARKER).is_file())
 }
 
-/// Where a dialog starts: the folder of the current file, otherwise the
+/// Where a dialog starts: the folder of the current file, otherwise
+/// `fallback`, the last folder used or the library folder, otherwise the
 /// Documents folder. `None` lets the system choose.
-fn start_dir(file: Option<&Path>) -> Option<PathBuf> {
-    if let Some(dir) = file.and_then(Path::parent).filter(|d| d.is_dir()) {
-        return Some(dir.to_path_buf());
-    }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join("Documents")).filter(|d| d.is_dir())
+fn start_dir(file: Option<&Path>, fallback: Option<&Path>) -> Option<PathBuf> {
+    // A bare file name has an empty parent, which is not a folder.
+    file.and_then(Path::parent)
+        .filter(|dir| dir.is_dir())
+        .or(fallback.filter(|dir| dir.is_dir()))
+        .map(Path::to_path_buf)
+        .or_else(|| crate::documents::folder().filter(|dir| dir.is_dir()))
 }
 
-fn dialog(file: Option<&Path>) -> FileDialog {
+fn dialog(file: Option<&Path>, fallback: Option<&Path>) -> FileDialog {
     let dialog = FileDialog::new().add_filter("LoomDSP patch", &[EXTENSION]);
-    match start_dir(file) {
+    match start_dir(file, fallback) {
         Some(dir) => dialog.set_directory(dir),
         None => dialog,
     }
 }
 
 /// Asks for a patch to open.
-pub fn pick_open(current: Option<&Path>) -> Option<PathBuf> {
-    dialog(current).set_title("Open patch").pick_file()
+pub fn pick_open(current: Option<&Path>, fallback: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(answer) = fake::pick_open(start_dir(current, fallback)) {
+        return answer;
+    }
+    dialog(current, fallback).set_title("Open patch").pick_file()
 }
 
-/// Asks where to save, starting at `current`: the current file, or a file
-/// name to suggest. The result always has an extension.
-pub fn pick_save(current: Option<&Path>) -> Option<PathBuf> {
+/// What the Save dialog picked, starting at `current`.
+fn picked_save(current: Option<&Path>) -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(answer) = fake::pick_save(current) {
         return answer;
     }
-    let picked = dialog(current)
+    dialog(current, None)
         .set_title("Save patch")
         .set_file_name(display_name(current))
-        .save_file()?;
+        .save_file()
+}
+
+/// Asks where to save, starting at `current`: the current file, or a file
+/// name to suggest. The result always has an extension.
+pub fn pick_save(current: Option<&Path>) -> Saving {
+    let Some(picked) = picked_save(current) else {
+        return Saving::Cancelled;
+    };
     let path = with_extension(picked.clone());
     // The dialog checked the name it returned. If adding the extension made
     // a different file, that one needs its own confirmation.
     if path != picked && path.exists() {
-        // With no way to ask, keep the name the dialog confirmed.
-        if !dialogs_available() {
-            return Some(picked);
-        }
-        if !confirm_replace(&path) {
-            return None;
-        }
+        Saving::Confirm(path)
+    } else {
+        Saving::Chosen(path)
     }
-    Some(path)
 }
 
-fn confirm_replace(path: &Path) -> bool {
-    let result = MessageDialog::new()
-        .set_level(MessageLevel::Warning)
-        .set_title(format!("Replace \"{}\"?", display_name(Some(path))))
-        .set_description("A file with this name already exists. Saving replaces it.")
-        .set_buttons(MessageButtons::YesNo)
-        .show();
-    result == MessageDialogResult::Yes
-}
-
-/// Asks what to do with unsaved changes.
-pub fn confirm_discard(name: &str) -> Choice {
+/// Asks whether to add the user's name to the authors of a patch made by
+/// others (patch-metadata.md, rule 3). `None` when no dialog can be shown:
+/// then nothing is added, and the question is asked again next time.
+pub fn confirm_add_author(name: &str, authors: &[String]) -> Option<bool> {
     #[cfg(test)]
-    if let Some(choice) = fake::confirm_discard(name) {
-        return choice;
+    if let Some(answer) = fake::confirm_add_author(name) {
+        return answer;
     }
     if !dialogs_available() {
-        return Choice::Unavailable;
+        return None;
     }
+    let by = if authors.is_empty() {
+        "This patch lists no authors.".to_string()
+    } else {
+        format!("This patch is by {}.", authors.join(", "))
+    };
     let result = MessageDialog::new()
-        .set_level(MessageLevel::Warning)
-        .set_title(format!("Save changes to \"{name}\"?"))
-        .set_description("Your changes will be lost if you do not save them.")
-        .set_buttons(MessageButtons::YesNoCancelCustom(
-            "Save".to_string(),
-            "Don't Save".to_string(),
-            "Cancel".to_string(),
+        .set_level(MessageLevel::Info)
+        .set_title(format!("Add \"{name}\" as an author?"))
+        .set_description(format!(
+            "{by} Adding your name credits your changes. Every author stays in the list."
+        ))
+        // Two answers only: the save goes ahead either way, so a Cancel
+        // button would promise something the question does not do.
+        .set_buttons(MessageButtons::OkCancelCustom(
+            "Add my name".to_string(),
+            "Not for this patch".to_string(),
         ))
         .show();
     match result {
-        MessageDialogResult::Custom(label) if label == "Save" => Choice::Save,
-        MessageDialogResult::Custom(label) if label == "Don't Save" => Choice::DontSave,
-        MessageDialogResult::Yes => Choice::Save,
-        MessageDialogResult::No => Choice::DontSave,
-        _ => Choice::Cancel,
+        MessageDialogResult::Custom(label) if label == "Add my name" => Some(true),
+        MessageDialogResult::Ok | MessageDialogResult::Yes => Some(true),
+        _ => Some(false),
     }
 }
 
 /// False on Linux when no program that draws message boxes is installed.
-/// Then the dialog would return "cancel" without showing anything.
+/// Then the dialog would return "cancel" without showing anything. Only the
+/// credit and crash recovery questions are still native.
 pub fn dialogs_available() -> bool {
     if !cfg!(target_os = "linux") {
         return true;
@@ -198,8 +237,9 @@ pub fn dialogs_available() -> bool {
     std::env::split_paths(&path).any(|dir| ["zenity", "kdialog"].iter().any(|p| dir.join(p).is_file()))
 }
 
-/// Tells the user that something failed. One button, so it cannot be a
-/// question.
+/// Tells the user that something failed before the window exists. Once it
+/// does, the app says so in the window (`App::show_error`). One button, so
+/// it cannot be a question.
 pub fn show_error(message: &str) {
     // Tests record the message: a native dialog would stop them.
     #[cfg(test)]
@@ -213,8 +253,8 @@ pub fn show_error(message: &str) {
         .show();
 }
 
-/// Stand-ins for the Save dialog, the unsaved changes question, and error
-/// messages in tests, which must not stop at a native dialog. Each test
+/// Stand-ins for the Open and Save dialogs, and native questions and error
+/// messages, in tests, which must not stop at a native dialog. Each test
 /// runs on its own thread, so each has its own record.
 #[cfg(test)]
 pub mod fake;

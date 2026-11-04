@@ -9,7 +9,7 @@ A safety stage on the engine's final output, so a patch mistake cannot harm the 
 - **Background:** [Output safety explainer](../learn/output-safety.md): why DC harms speakers, why a hard clip is not enough, and what lookahead buys. For rule 14, see [Stopping a stream without a click](../learn/stopping-a-stream.md).
 - **Prior art:** most DAWs leave the master bus unprotected and expect the user to add a limiter. Hardware mixers and PA processors often have a fixed output limiter. We describe our own stage here.
 - **Issues:** [#131](https://github.com/brylie/LoomDSP/issues/131); rule 14 comes from [#26](https://github.com/brylie/LoomDSP/issues/26) (device selection), rule 15 from [#341](https://github.com/brylie/LoomDSP/issues/341). Related: [#200](https://github.com/brylie/LoomDSP/issues/200) (listening checks), [#25](https://github.com/brylie/LoomDSP/issues/25) (Panic), [#130](https://github.com/brylie/LoomDSP/issues/130) (silenced samples in the stats bar), [#121](https://github.com/brylie/LoomDSP/issues/121), [#123](https://github.com/brylie/LoomDSP/pull/123).
-- **Code:** `crates/loom-core/src/safety.rs`, run at the end of `Engine::run_block`. Mode changes: `Controller::set_output_safety`. Fade-out before a stop: `Controller::fade_out`, `Engine::is_silent`, and `RunningAudio::stop` in `crates/loom-host-desktop`. Restart fade: `Engine::restart_fade_sender` and `resume_after_switch`. Flags: `crates/loom-cli/src/main.rs`, `crates/loom-app/src/main.rs`. Tests: `crates/loom-modules/tests/output_safety.rs`.
+- **Code:** `crates/loom-core/src/safety.rs`, `crates/loom-dsp/src/limiter.rs`, `crates/loom-dsp/src/filter/dc_blocker.rs`, run at the end of `Engine::run_block`. Mode changes: `Controller::set_output_safety`. Fade-out before a stop: `Controller::fade_out`, `Engine::is_silent`, and `RunningAudio::stop` in `crates/loom-host-desktop`. Restart fade: `Engine::restart_fade_sender` and `resume_after_switch`. Flags: `crates/loom-cli/src/main.rs`, `crates/loom-app/src/main.rs`. Tests: `crates/loom-modules/tests/output_safety.rs`.
 
 ## Goal
 
@@ -101,7 +101,7 @@ Five further rate-switch capture attempts on the same setup each observed the ou
 
 - A preferences store and a preferences window for the app. This spec only says the mode is a per-machine preference. The store and window are specified in [App preferences](preferences.md).
 - A user-facing master volume.
-- Showing limiter activity in the stats bar. That belongs to [#130](https://github.com/brylie/LoomDSP/issues/130), which can count limited samples the same way it counts silenced ones.
+- Showing limiter activity in the stats bar. That belongs to [#590](https://github.com/brylie/LoomDSP/issues/590), which can count limited samples the same way [#130](https://github.com/brylie/LoomDSP/issues/130) counts silenced ones.
 - Per-channel modes, for DC-coupled multi-channel interfaces. This waits for outputs beyond stereo.
 - True-peak (oversampled) limiting, and a configurable ceiling.
 - Exposing the mode in exported plugins, and reporting Clean mode's latency to a host (FR-NATIVE-03).

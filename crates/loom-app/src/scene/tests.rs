@@ -448,6 +448,28 @@ fn envelope_preview_follows_parameter_edits() {
     assert_eq!(panel, panel_view(&loom_modules::env::ENVELOPE));
 }
 
+/// The EQ's curve is drawn for the engine's sample rate: the same knobs make a
+/// different sound at a different rate, so they draw a different curve.
+#[test]
+fn the_eq_curve_uses_the_engines_sample_rate() {
+    let curve = |sample_rate: f32| {
+        let config = loom_core::EngineConfig::with_sample_rate(sample_rate);
+        let mut parts = loom_core::create_engine(loom_modules::registry(), config);
+        let eq = parts.controller.add_module("loom.eq.eq").unwrap();
+        parts.controller.set_param_named(eq, "mid_freq", 16_000.0).unwrap();
+        parts.controller.set_param_named(eq, "mid_gain", 12.0).unwrap();
+        let mut values = PanelValues::new();
+        update_panel_values(&mut values, &parts.controller, &BTreeMap::new());
+        values.get(eq.0, 0).unwrap().shape.clone()
+    };
+    let (low, high) = (curve(44_100.0), curve(96_000.0));
+    // At 20 kHz, the right edge of the curve, the bell measures 1.6 dB at
+    // 44.1 kHz and 8.7 dB at 96 kHz. The curve spans 48 dB.
+    let last = low.len() - 1;
+    let difference = (high[last] - low[last]) * 48.0;
+    assert!((difference - 7.1).abs() < 0.5, "{difference} dB apart at 20 kHz");
+}
+
 /// Envelope in AD mode hides Sustain and Release: the tile keeps its
 /// size, and Attack, Decay, and Curve close up, centred in their row
 /// (ADR-0030). In ADSR mode all five show where they were declared.
@@ -539,4 +561,33 @@ fn the_all_modules_patch_has_every_module_without_overlap() {
             assert!(ra.intersection(rb).is_none(), "{a} overlaps {b}");
         }
     }
+}
+
+/// A meter on a display value draws from its range's zero, takes the display
+/// value's text, and shows its place in the range, not the number as stored
+/// (panel-widgets.md, Meter on a display value).
+#[test]
+fn a_meter_shows_a_display_value_from_its_zero() {
+    use loom_modules::dynamics::DYNAMICS;
+    let index = DYNAMICS
+        .panel
+        .widgets
+        .iter()
+        .position(|w| w.bind == "reduction")
+        .unwrap();
+    let view = panel_view(&DYNAMICS);
+    let meter = &view.widgets[index];
+    assert_eq!(meter.kind, WidgetViewKind::Meter { zero: 1.0 });
+    assert_eq!(meter.label, "Reduction");
+    assert_eq!(
+        meter.hover,
+        HoverText::new("Reduction", DYNAMICS.displays[0].description, "reduction")
+    );
+    let range = DYNAMICS.displays[0].range;
+    assert_eq!(range.position(-18.0), 0.5);
+    assert_eq!(range.value(0.5), -18.0);
+    assert_eq!(
+        display_text(&DYNAMICS, &DYNAMICS.panel.widgets[index], -18.0, None),
+        "Reduction: -18.0 dB"
+    );
 }

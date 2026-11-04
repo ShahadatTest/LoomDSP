@@ -366,7 +366,76 @@ pub enum ParamMapping {
     Logarithmic,
 }
 
+/// Why typed text is not a value of a parameter. Its text is what the field
+/// shows, such as "Not a number in Hz".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotANumber {
+    unit: &'static str,
+}
+
+impl std::fmt::Display for NotANumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.unit.is_empty() {
+            write!(f, "Not a number")
+        } else {
+            write!(f, "Not a number in {}", self.unit)
+        }
+    }
+}
+
 impl ParamSpec {
+    /// How many values a whole-number parameter can take: its names, or the
+    /// numbers in its range.
+    pub fn value_count(&self) -> usize {
+        if self.options.choices.is_empty() {
+            (self.max - self.min).max(0.0) as usize + 1
+        } else {
+            self.options.choices.len()
+        }
+    }
+
+    /// What a select list shows for each value of a whole-number parameter:
+    /// its names, or its numbers with the unit, such as "4 voices"
+    /// (panel-widgets.md, Select list).
+    pub fn value_names(&self) -> Vec<String> {
+        if self.options.choices.is_empty() {
+            (0..self.value_count())
+                .map(|i| self.value_text(self.min + i as f32))
+                .collect()
+        } else {
+            self.options.choices.iter().map(ToString::to_string).collect()
+        }
+    }
+
+    /// A typed value: a number in this parameter's unit, optionally followed
+    /// by that unit, in any case and with or without a space. A `k` after the
+    /// number multiplies by 1000, and a comma is read as a decimal point. The
+    /// result is rounded for a whole-number parameter and clamped to this
+    /// spec's range, so parse with the descriptor's spec to reach the whole
+    /// range. Spec: `docs/design/panel-widgets.md`, Typing a value.
+    pub fn parse_value_text(&self, text: &str) -> Result<f32, NotANumber> {
+        let bad = NotANumber { unit: self.unit };
+        let text = text.trim().replace(',', ".").to_lowercase();
+        let unit = self.unit.to_lowercase();
+        let number = match text.strip_suffix(unit.as_str()) {
+            Some(rest) if !unit.is_empty() => rest.trim_end(),
+            _ => text.as_str(),
+        };
+        let (digits, scale) = match number.strip_suffix('k') {
+            Some(rest) => (rest.trim_end(), 1000.0),
+            None => (number, 1.0),
+        };
+        let value = digits.parse::<f32>().map_err(|_| bad)? * scale;
+        // Rust reads "NaN" and "inf" as numbers. A player never means them.
+        if value.is_finite() {
+            // Adding zero turns -0.0, from "-0.4" on a whole number, into 0.0,
+            // so the control never shows "-0".
+            Ok(self.clamp(value) + 0.0)
+        } else {
+            Err(bad)
+        }
+    }
+
     /// A value of this parameter with its unit, such as "1000 Hz", for help
     /// text. The in-app help and the generated pages share it.
     pub fn value_text(&self, value: f32) -> String {
@@ -764,20 +833,21 @@ pub struct ModuleDescriptor {
 /// is a compile error, as for [`PortSpec`]:
 ///
 /// ```
-/// use loom_core::{DisplayKind, DisplaySpec};
+/// use loom_core::{DisplayKind, DisplayRange, DisplaySpec};
 ///
 /// const GATE: DisplaySpec = DisplaySpec {
 ///     name: "gate",
 ///     label: "Gate",
 ///     description: "Lit while a key is held.",
 ///     kind: DisplayKind::Level,
+///     range: DisplayRange::UNIT,
 /// };
 /// ```
 ///
 /// The name is the stable ID that panels and [`Module::displays`](crate::Module::displays)
 /// use. The label is the light's caption, and the description its hover
 /// text. Spec: `docs/design/port-and-parameter-text.md`, Display values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplaySpec {
     /// Stable name that panel widgets bind to.
     pub name: &'static str,
@@ -787,6 +857,115 @@ pub struct DisplaySpec {
     pub description: &'static str,
     /// How the engine stores it and the UI reads it.
     pub kind: DisplayKind,
+    /// The values it can take, for a meter bound to it.
+    pub range: DisplayRange,
+}
+
+/// The values a display value can take. A meter bound to the value spans this
+/// range. If the range holds 0, the meter's bar starts from there. Spec:
+/// `docs/design/panel-widgets.md`, Meter on a display value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayRange {
+    /// The lowest value.
+    pub min: f32,
+    /// The highest value.
+    pub max: f32,
+    /// The unit in hover text and on a readout, such as "dB". May be empty.
+    pub unit: &'static str,
+    /// How a readout writes the value.
+    pub format: DisplayFormat,
+}
+
+/// How a readout writes a display value (panel-widgets.md, Readout).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DisplayFormat {
+    /// A plain number with this many decimals, and the unit.
+    Number {
+        /// Digits after the decimal point.
+        decimals: u8,
+    },
+    /// A pitch as a note name and cents, at 0.1 per octave with 0.0 as middle
+    /// C, such as "A4 +12¢".
+    Note,
+    /// A name for each whole value, counted from the range's lowest.
+    Choices(&'static [&'static str]),
+}
+
+impl DisplayRange {
+    /// From 0 to 1 with no unit: a brightness, or a level as a factor.
+    pub const UNIT: Self = Self {
+        min: 0.0,
+        max: 1.0,
+        unit: "",
+        format: DisplayFormat::Number { decimals: 2 },
+    };
+
+    /// What a readout shows for `value`. Text that does not name a number,
+    /// such as for NaN, is "--", because a readout never fails.
+    pub fn text(&self, value: f32) -> String {
+        if !value.is_finite() {
+            return "--".to_string();
+        }
+        match self.format {
+            DisplayFormat::Number { decimals } => {
+                let digits = usize::from(decimals);
+                let number = format!("{value:.digits$}");
+                // A small negative value rounds to "-0.0". Around silence the
+                // text would flip between that and "0.0".
+                let number = match number.strip_prefix('-') {
+                    Some(rest) if !rest.contains(|c: char| matches!(c, '1'..='9')) => rest,
+                    _ => number.as_str(),
+                };
+                if self.unit.is_empty() {
+                    number.to_string()
+                } else {
+                    format!("{number} {}", self.unit)
+                }
+            }
+            DisplayFormat::Note => note_text(value),
+            DisplayFormat::Choices(names) => {
+                let index = (value - self.min).round().max(0.0) as usize;
+                names
+                    .get(index.min(names.len().saturating_sub(1)))
+                    .copied()
+                    .unwrap_or("--")
+                    .to_string()
+            }
+        }
+    }
+
+    /// Where `value` falls in the range, from 0 to 1.
+    pub fn position(&self, value: f32) -> f32 {
+        ((value - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
+    }
+
+    /// The value at `position`, the opposite of [`DisplayRange::position`].
+    pub fn value(&self, position: f32) -> f32 {
+        self.min + position * (self.max - self.min)
+    }
+
+    /// Where a meter's bar starts, from 0 to 1: the position of 0, or the
+    /// bottom of the range if the range does not hold 0.
+    pub fn zero(&self) -> f32 {
+        self.position(0.0)
+    }
+}
+
+/// A pitch as a note name and cents. Pitch is 0.1 per octave, with 0.0 as
+/// middle C (ADR-0007), which is C4, or note 60 in MIDI.
+fn note_text(pitch: f32) -> String {
+    const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let semitones = 60.0 + f64::from(pitch) * 120.0;
+    let nearest = semitones.round();
+    let cents = ((semitones - nearest) * 100.0).round() as i32;
+    let note = nearest as i64;
+    let name = NAMES[note.rem_euclid(12) as usize];
+    let octave = note.div_euclid(12) - 1;
+    if cents == 0 {
+        format!("{name}{octave}")
+    } else {
+        format!("{name}{octave} {cents:+}¢")
+    }
 }
 
 /// How a display value travels from the engine to a light.
@@ -800,6 +979,10 @@ pub enum DisplayKind {
     /// one-sample trigger between two frames still lights the light.
     Trigger,
 }
+
+/// Most values a select list can offer. A list this long still scrolls and
+/// types ahead in reasonable time, and a larger range belongs on a number.
+pub const MAX_SELECT_VALUES: usize = 128;
 
 /// Most display values one module can publish.
 pub const MAX_DISPLAYS: usize = 4;
@@ -857,6 +1040,41 @@ impl Widget {
     pub const fn knob(x: u8, y: u8, param: &'static str) -> Self {
         Self {
             kind: WidgetKind::Knob,
+            x,
+            y,
+            bind: param,
+            caption: None,
+        }
+    }
+
+    /// A vertical fader for any parameter: a track with a handle, 2 × 6 grid
+    /// units (panel-widgets.md, Fader).
+    pub const fn fader(x: u8, y: u8, param: &'static str) -> Self {
+        Self {
+            kind: WidgetKind::Fader { vertical: true },
+            x,
+            y,
+            bind: param,
+            caption: None,
+        }
+    }
+
+    /// A horizontal fader for any parameter, 6 × 2 grid units.
+    pub const fn fader_horizontal(x: u8, y: u8, param: &'static str) -> Self {
+        Self {
+            kind: WidgetKind::Fader { vertical: false },
+            x,
+            y,
+            bind: param,
+            caption: None,
+        }
+    }
+
+    /// A number shown as text, dragged like a knob, for any parameter
+    /// (panel-widgets.md, Number).
+    pub const fn number(x: u8, y: u8, param: &'static str) -> Self {
+        Self {
+            kind: WidgetKind::Number,
             x,
             y,
             bind: param,
@@ -923,6 +1141,19 @@ impl Widget {
         }
     }
 
+    /// A display value as text, `width` grid units wide: 3, or 6 for longer
+    /// text (panel-widgets.md, Readout). The display value's range says how
+    /// it is written.
+    pub const fn readout(x: u8, y: u8, width: u8, display: &'static str) -> Self {
+        Self {
+            kind: WidgetKind::Readout { width },
+            x,
+            y,
+            bind: display,
+            caption: None,
+        }
+    }
+
     /// A level meter on output `output`, fed by a port probe.
     pub const fn meter(x: u8, y: u8, output: &'static str) -> Self {
         Self {
@@ -947,15 +1178,17 @@ impl Widget {
     }
 
     /// A read-only result shape above its controls. `sample` maps the module's
-    /// parameter values and a horizontal position in 0..1 to a vertical
-    /// position in 0..1. It runs on the UI thread, never in audio processing.
+    /// parameter values, a horizontal position in 0..1, and the sample rate to a
+    /// vertical position in 0..1. A digital filter's response depends on the
+    /// sample rate, so a preview of one needs it. It runs on the UI thread,
+    /// never in audio processing.
     pub const fn shape(
         x: u8,
         y: u8,
         width: u8,
         output: &'static str,
         label: &'static str,
-        sample: fn(&[f32], f32) -> f32,
+        sample: fn(&[f32], f32, f32) -> f32,
     ) -> Self {
         Self {
             kind: WidgetKind::Shape { width, label, sample },
@@ -1002,12 +1235,17 @@ impl Widget {
     pub const fn is_control(&self) -> bool {
         !matches!(
             self.kind,
-            WidgetKind::Light | WidgetKind::Meter | WidgetKind::Scope | WidgetKind::Shape { .. }
+            WidgetKind::Light
+                | WidgetKind::Readout { .. }
+                | WidgetKind::Meter
+                | WidgetKind::Scope
+                | WidgetKind::Shape { .. }
         )
     }
 
-    /// True for widgets bound to one of the module's outputs, fed by a
-    /// port probe: meters and scopes.
+    /// True for widgets that can be bound to one of the module's outputs, fed
+    /// by a port probe: meters and scopes. A meter can show a display value
+    /// instead: see [`ModuleDescriptor::meter_display`].
     pub const fn shows_output(&self) -> bool {
         matches!(self.kind, WidgetKind::Meter | WidgetKind::Scope)
     }
@@ -1019,6 +1257,13 @@ impl Widget {
 pub enum WidgetKind {
     /// A dial for any parameter.
     Knob,
+    /// A straight track with a handle, for any parameter.
+    Fader {
+        /// True for a vertical track, false for a horizontal one.
+        vertical: bool,
+    },
+    /// A value shown as text, dragged like a knob, for any parameter.
+    Number,
     /// Off or on, for a whole-number parameter from 0 to 1.
     Toggle,
     /// One button per choice name, for a whole-number parameter that names
@@ -1034,6 +1279,11 @@ pub enum WidgetKind {
     },
     /// A display value as brightness, clamped to 0 to 1.
     Light,
+    /// A display value as text.
+    Readout {
+        /// Width in panel grid units: 3, or 6 for longer text.
+        width: u8,
+    },
     /// The level of one of the module's outputs, from a port probe: an RMS
     /// bar and a peak line, -60 dB to 0 dB.
     Meter,
@@ -1046,8 +1296,9 @@ pub enum WidgetKind {
         width: u8,
         /// Caption shown beneath the read-only result.
         label: &'static str,
-        /// Pure sampler: parameter values, horizontal position, vertical position.
-        sample: fn(&[f32], f32) -> f32,
+        /// Pure sampler: parameter values, horizontal position, and sample rate
+        /// to a vertical position.
+        sample: fn(&[f32], f32, f32) -> f32,
     },
     /// A large button for whole-number parameters from 0 to 1.
     ///
@@ -1064,10 +1315,38 @@ pub enum WidgetKind {
     },
 }
 
+impl WidgetKind {
+    /// True for a widget that shows one number on a position, and sets it
+    /// through the parameter's mapping (panel-widgets.md, One number). It
+    /// takes typed values.
+    ///
+    /// `WidgetKind` is `non_exhaustive`, so a new kind compiles at every
+    /// `_` arm. Code that treats number controls alike asks this, not a list.
+    pub const fn is_one_number(&self) -> bool {
+        matches!(self, Self::Knob | Self::Fader { .. } | Self::Number)
+    }
+
+    /// True for a widget that draws a modulation assignment's reach as a
+    /// range, and a live value on it: an arc or a bar (rule 3). Other controls
+    /// show a dot.
+    pub const fn has_range(&self) -> bool {
+        matches!(self, Self::Knob | Self::Fader { .. })
+    }
+
+    /// True for a control that takes a dropped output as a modulation
+    /// assignment (modulation.md, Making an assignment).
+    pub const fn takes_modulation(&self) -> bool {
+        self.is_one_number() || matches!(self, Self::Toggle | Self::Radio | Self::Select | Self::Segmented { .. })
+    }
+}
+
 impl PartialEq for WidgetKind {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::Fader { vertical: a }, Self::Fader { vertical: b }) => a == b,
+            (Self::Readout { width: a }, Self::Readout { width: b }) => a == b,
             (Self::Knob, Self::Knob)
+            | (Self::Number, Self::Number)
             | (Self::Toggle, Self::Toggle)
             | (Self::Radio, Self::Radio)
             | (Self::Select, Self::Select)
@@ -1205,6 +1484,10 @@ impl ModuleDescriptor {
     pub fn widget_size(&self, widget: &Widget) -> (u8, u8) {
         match widget.kind {
             WidgetKind::Knob => (3, 3),
+            WidgetKind::Fader { vertical: true } => (2, 6),
+            WidgetKind::Fader { vertical: false } => (6, 2),
+            WidgetKind::Number => (5, 2),
+            WidgetKind::Readout { width } => (width, 2),
             WidgetKind::Meter => (3, 6),
             WidgetKind::Scope => (9, 5),
             WidgetKind::Shape { width, .. } => (width, 5),
@@ -1234,6 +1517,15 @@ impl ModuleDescriptor {
         let value = values.get(mode).copied().unwrap_or(self.params[mode].default);
         let choice = (value - self.params[mode].min).round();
         when.choices.iter().any(|&c| c as f32 == choice)
+    }
+
+    /// The display value a meter shows, or `None` for any other widget and for
+    /// a meter on an output.
+    pub fn meter_display(&self, widget: &Widget) -> Option<&DisplaySpec> {
+        if widget.kind != WidgetKind::Meter || self.outputs.iter().any(|port| port.name == widget.bind) {
+            return None;
+        }
+        self.displays.iter().find(|display| display.name == widget.bind)
     }
 
     /// Index of a display value by name.
@@ -1377,16 +1669,29 @@ impl ModuleDescriptor {
                             "a segmented control needs a width and 2 to 4 named whole-number choices",
                         ));
                     }
-                    WidgetKind::Select
-                        if !integer || param.options.choices.is_empty() || param.options.choices.len() > 12 =>
-                    {
-                        return Err(name("a select list needs 1 to 12 named whole-number choices"));
+                    WidgetKind::Select if !integer || !(1..=MAX_SELECT_VALUES).contains(&param.value_count()) => {
+                        return Err(name(
+                            "a select list needs a whole-number parameter with 1 to 128 values",
+                        ));
                     }
                     WidgetKind::Button { .. } if !(integer && param.min == 0.0 && param.max == 1.0) => {
                         return Err(name("a button needs a whole-number parameter from 0 to 1"));
                     }
                     _ => {}
                 }
+            } else if let WidgetKind::Readout { width } = widget.kind {
+                let Some(display) = self.displays.iter().find(|display| display.name == widget.bind) else {
+                    return Err(name("a readout needs a display value"));
+                };
+                // Reading a trigger takes it, so only the watcher may.
+                if display.kind == DisplayKind::Trigger {
+                    return Err(name("a readout cannot show a trigger, because reading one takes it"));
+                }
+                if width != 3 && width != 6 {
+                    return Err(name("a readout is 3 or 6 grid units wide"));
+                }
+            } else if self.meter_display(widget).is_some() {
+                // A meter on a display value (panel-widgets.md).
             } else if widget.shows_output() || matches!(widget.kind, WidgetKind::Shape { .. }) {
                 if !self.outputs.iter().any(|port| port.name == widget.bind) {
                     return Err(name("no such output"));

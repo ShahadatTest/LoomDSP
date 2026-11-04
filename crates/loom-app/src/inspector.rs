@@ -14,15 +14,18 @@ use iced::widget::{
     tooltip,
 };
 use iced::{Element, Length, Theme};
-use loom_core::{AssignmentId, ModuleId, OutputRef, WidgetKind};
+use loom_core::{AssignmentId, ModuleId, OutputRef};
 use serde::Serialize;
+
+/// Width of a parameter's value field, in pixels.
+const VALUE_FIELD_WIDTH: f32 = 84.0;
 
 /// What the inspector shows.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Inspector {
-    /// Nothing selected: a title and help text.
-    Help,
+    /// Nothing selected: patch info, then help text.
+    Patch(crate::patch_info::PatchRows),
     /// Several modules selected: how many.
     Several(usize),
     /// One module selected.
@@ -102,6 +105,9 @@ pub struct ParamRow {
     pub name: Option<String>,
     /// The value as text, with its unit.
     pub value: String,
+    /// The value field beside the slider, for a parameter with no choice
+    /// names, outside MIDI learn mode (panel-widgets.md, Typing a value).
+    pub field: Option<ValueField>,
     /// The MIDI control mapped to it.
     pub mapping: Option<String>,
     /// The **Range** selector, for a parameter that offers ranges.
@@ -113,6 +119,15 @@ pub struct ParamRow {
     /// Whether a dragged output can target this row.
     #[serde(skip)]
     pub accepts_drop: bool,
+}
+
+/// What a parameter's value field shows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ValueField {
+    /// The draft being typed, or else the value as text.
+    pub text: String,
+    /// Why the draft is not a value, if it is not.
+    pub error: Option<String>,
 }
 
 /// The **Range** selector next to a parameter's slider
@@ -247,7 +262,7 @@ impl App {
         let graph = self.controller.graph();
         let mut selected = self.selection.iter();
         let id = match (selected.next(), selected.next()) {
-            (None, _) => return Inspector::Help,
+            (None, _) => return Inspector::Patch(self.patch_rows()),
             (Some(&id), None) => id,
             (Some(_), Some(_)) => return Inspector::Several(self.selection.len()),
         };
@@ -355,28 +370,33 @@ impl App {
                         None => "Not used in this mode".to_string(),
                     }
                 });
+                let shown = param::format(spec, value);
+                let field = (matches!(mode, ParamMode::Edit { .. }) && spec.options.choices.is_empty()).then(|| {
+                    match self.value_draft.as_ref().filter(|d| d.module == id && d.index == index) {
+                        Some(draft) => ValueField {
+                            text: draft.text.clone(),
+                            error: draft.error.clone(),
+                        },
+                        None => ValueField {
+                            text: shown.clone(),
+                            error: None,
+                        },
+                    }
+                });
                 ParamRow {
                     index,
                     label: spec.label,
                     description: spec.description,
                     name: hover.name,
                     unused,
-                    value: param::format(spec, value),
+                    field,
+                    value: shown,
                     mapping,
                     range,
                     mode,
                     accepts_drop: {
                         let bound = d.panel.widgets.iter().filter(|w| w.bind == spec.name);
-                        bound.clone().next().is_none()
-                            || bound.into_iter().any(|w| {
-                                matches!(
-                                    w.kind,
-                                    WidgetKind::Knob
-                                        | WidgetKind::Toggle
-                                        | WidgetKind::Radio
-                                        | WidgetKind::Segmented { .. }
-                                )
-                            })
+                        bound.clone().next().is_none() || bound.into_iter().any(|w| w.kind.takes_modulation())
                     },
                 }
             })
@@ -477,10 +497,17 @@ impl App {
 }
 
 /// The inspector's widgets.
-pub fn view<'a>(model: Inspector, drop_row: Option<(u32, usize)>, dragging: bool) -> Element<'a, Message> {
+pub fn view<'a>(
+    model: Inspector,
+    authors: &'a iced::widget::text_editor::Content,
+    drop_row: Option<(u32, usize)>,
+    dragging: bool,
+) -> Element<'a, Message> {
     let content: Element<'a, Message> = match model {
         // Short, with the full list one click away (visual-system.md).
-        Inspector::Help => column![
+        Inspector::Patch(rows) => column![
+            crate::patch_info::view(rows, authors),
+            iced::widget::rule::horizontal(1),
             text("Select a module to edit it.").size(style::BODY).color(DIM),
             text("Press A over the canvas to add one.").size(style::BODY).color(DIM),
             button(text("Keyboard shortcuts").size(style::CONTROL)).on_press(Message::ShowShortcuts),
@@ -586,7 +613,7 @@ fn module_view<'a>(m: ModuleRows, drop_row: Option<(u32, usize)>, dragging: bool
                         ),
                         space::horizontal(),
                         text(p.unused.unwrap_or_default()).size(style::SMALL).color(DIM),
-                        text(p.value).size(style::BODY).color(DIM),
+                        value_field(id, index, p.field, p.value),
                     ]
                     .spacing(6),
                     match p.range {
@@ -663,6 +690,42 @@ fn module_view<'a>(m: ModuleRows, drop_row: Option<(u32, usize)>, dragging: bool
         ));
     }
     items.into()
+}
+
+/// A parameter's value: a field to type in, or plain text for a parameter
+/// that names its values. Text that is not a value gets a warning outline and
+/// the reason in hover text.
+fn value_field<'a>(module: u32, index: usize, field: Option<ValueField>, value: String) -> Element<'a, Message> {
+    let Some(field) = field else {
+        return text(value).size(style::BODY).color(DIM).into();
+    };
+    let bad = field.error.is_some();
+    let input = text_input(&value, &field.text)
+        .id(crate::controls::value_field_id(module, index))
+        .on_input(move |text| Message::ValueText { module, index, text })
+        .on_submit(Message::ValueSubmit { module, index })
+        .size(style::BODY)
+        .width(VALUE_FIELD_WIDTH)
+        .padding(1)
+        .style(move |theme: &Theme, status| {
+            let mut style = text_input::default(theme, status);
+            if bad {
+                style.border.color = theme.extended_palette().danger.strong.color;
+                style.border.width = 2.0;
+            }
+            style
+        });
+    // The tooltip stays when the text is good, with nothing in it. Without it
+    // the field would sit at another place in the widget tree once the text
+    // turned bad, and lose its focus and caret on that character.
+    let reason: Element<'a, Message> = match field.error {
+        Some(reason) => container(text(reason).size(style::BODY))
+            .padding(6)
+            .style(container::rounded_box)
+            .into(),
+        None => iced::widget::space().into(),
+    };
+    tooltip(input, reason, tooltip::Position::Top).into()
 }
 
 /// The slider of a parameter, or its choice names as radio buttons or a

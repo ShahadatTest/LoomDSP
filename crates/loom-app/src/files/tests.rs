@@ -57,11 +57,22 @@ fn examples_follow_the_executable() {
     assert_eq!(examples_for_executable(Some(&external), &checkout), Some(checkout));
 }
 
-/// A suggested file name with no folder starts the Save dialog where an
-/// untitled patch starts it: in the Documents folder.
+/// A dialog starts in the current file's folder, then the fallback, and a
+/// suggested file name with no folder counts as no file.
 #[test]
-fn a_bare_file_name_starts_in_the_documents_folder() {
-    assert_eq!(start_dir(Some(Path::new("bass.ron"))), start_dir(None));
+fn a_dialog_starts_in_the_files_folder_then_the_fallback() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = here.join("src");
+    let file = src.join("main.rs");
+    assert_eq!(start_dir(Some(&file), Some(here)), Some(src.clone()));
+    assert_eq!(start_dir(None, Some(here)), Some(here.to_path_buf()));
+    assert_eq!(
+        start_dir(Some(Path::new("bass.ron")), Some(here)),
+        Some(here.to_path_buf())
+    );
+    // A folder that went away counts as none, and tests see no Documents.
+    assert_eq!(start_dir(None, Some(&here.join("no-such-folder"))), None);
+    assert_eq!(start_dir(None, None), None);
 }
 
 /// Run from the checkout, the bundled examples folder is its
@@ -120,4 +131,18 @@ fn save_adds_the_extension_only_when_missing() {
     assert_eq!(with_extension(PathBuf::from("a/bass")), PathBuf::from("a/bass.ron"));
     assert_eq!(with_extension(PathBuf::from("a/bass.ron")), PathBuf::from("a/bass.ron"));
     assert_eq!(with_extension(PathBuf::from("a/bass.txt")), PathBuf::from("a/bass.txt"));
+}
+
+/// Save As in the library: the suggested name comes from the patch name,
+/// without characters file systems refuse, and never names an existing file.
+#[test]
+fn save_as_suggests_a_free_name_from_the_patch_name() {
+    assert_eq!(file_stem("Low Drone"), "Low Drone");
+    assert_eq!(file_stem(" a/b:c*?.  "), "abc");
+    assert_eq!(file_stem("..."), "Untitled");
+    let tmp = TempDir::new("free-path");
+    assert_eq!(free_path(&tmp.0, "Low Drone"), tmp.0.join("Low Drone.ron"));
+    std::fs::write(tmp.0.join("Low Drone.ron"), "").unwrap();
+    std::fs::write(tmp.0.join("Low Drone 2.ron"), "").unwrap();
+    assert_eq!(free_path(&tmp.0, "Low Drone"), tmp.0.join("Low Drone 3.ron"));
 }

@@ -21,6 +21,8 @@ fn panels_follow_the_spec() {
         ("loom.osc.noise", "seed"),
         ("loom.rand.chance", "seed"),
         ("loom.rand.random", "seed"),
+        ("loom.route.selector", "seed"),
+        ("loom.route.selector", "repeats"),
         ("loom.midi.note", "channel"),
         ("loom.midi.note", "bend-range"),
         ("loom.ui.button", "mode"),
@@ -76,6 +78,8 @@ fn panels_follow_the_spec() {
             let non_knob = [
                 ("loom.io.audio-in", "pair"),
                 ("loom.io.audio-in", "mute"),
+                ("loom.gate.euclid", "source"),
+                ("loom.route.selector", "mode"),
                 ("loom.phase.wrap", "mode"),
                 ("loom.mix.crossfade", "law"),
                 ("loom.mix.mixer", "mute1"),
@@ -96,6 +100,12 @@ fn panels_follow_the_spec() {
                 ("loom.filter.ladder", "slope"),
                 ("loom.midi.controller", "source"),
                 ("loom.clock.transport", "run"),
+                ("loom.filter.crossover", "bands"),
+                ("loom.dyn.dynamics", "mode"),
+                ("loom.dyn.dynamics", "detect"),
+                ("loom.dyn.dynamics", "match"),
+                ("loom.eq.eq", "low_slope"),
+                ("loom.eq.eq", "high_slope"),
             ];
             if non_knob.contains(&(descriptor.id, param.name)) {
                 assert!(
@@ -141,10 +151,10 @@ fn panels_follow_the_spec() {
             .filter(|w| w.kind == loom_core::WidgetKind::Meter)
             .map(|w| w.bind)
             .collect();
-        let expected: &[&str] = if descriptor.id == "loom.display.meter" {
-            &["out"]
-        } else {
-            &[]
+        let expected: &[&str] = match descriptor.id {
+            "loom.display.meter" => &["out"],
+            "loom.dyn.dynamics" => &["reduction"],
+            _ => &[],
         };
         assert_eq!(meters, expected, "{}", descriptor.id);
         let scopes: Vec<&str> = panel
@@ -174,12 +184,15 @@ fn parameters_in_hz_and_seconds_are_logarithmic() {
                 assert_eq!(param.options.mapping, ParamMapping::Linear);
                 continue;
             }
-            // Random's glide starts at 0 (no glide), for the same reason.
-            if (descriptor.id, param.name) == ("loom.rand.random", "glide") {
+            // Random's glide and Selector's fade start at 0 (instant), for the
+            // same reason.
+            if [("loom.rand.random", "glide"), ("loom.route.selector", "fade")].contains(&(descriptor.id, param.name)) {
                 assert_eq!(param.options.mapping, ParamMapping::Linear);
                 continue;
             }
-            let expected = if matches!(param.unit, "Hz" | "s") {
+            // A ratio and a Q are heard as multiples, as a frequency is.
+            let multiple = [("loom.dyn.dynamics", "ratio"), ("loom.eq.eq", "mid_q")];
+            let expected = if matches!(param.unit, "Hz" | "s") || multiple.contains(&(descriptor.id, param.name)) {
                 ParamMapping::Logarithmic
             } else {
                 ParamMapping::Linear

@@ -30,8 +30,14 @@ const SCOPE_WINDOW: usize = 48_000;
 pub struct UiSnapshot {
     /// The window title.
     pub title: String,
-    /// The status bar message.
+    /// The latest status message.
     pub status: String,
+    /// How the latest status message reads: `info`, `warning`, or `error`.
+    pub status_severity: crate::alerts::Severity,
+    /// The problems kept on screen, oldest first.
+    pub errors: Vec<crate::alerts::KeptError>,
+    /// True while MIDI learn mode is on and the status bar says so.
+    pub learning: bool,
     /// The step Undo would take back, by name.
     pub undo: Option<String>,
     /// The step Redo would replay, by name.
@@ -48,6 +54,10 @@ pub struct UiSnapshot {
     pub inspector: Inspector,
     /// The open module help view, if any.
     pub help: Option<crate::help::Model>,
+    /// The rows of the recent list, while it is open.
+    pub recent: Option<Vec<crate::recent::Row>>,
+    /// The open question, if any (`docs/design/files.md`).
+    pub question: Option<crate::question::Model>,
     /// The active right-hand tab and visible modulation matrix rows.
     pub matrix: MatrixModel,
     /// The stats bar's audio numbers.
@@ -79,6 +89,10 @@ pub struct Stats {
     pub telemetry_dropped: u64,
     /// Recent input underrun and overrun corrections.
     pub input_alert: Option<(u64, u64)>,
+    /// The bar says the output silenced bad samples.
+    pub output_silenced: bool,
+    /// The bar says the output clipped.
+    pub output_clipped: bool,
 }
 
 impl Stats {
@@ -204,8 +218,8 @@ pub struct Widget {
     /// `Reson…` for `Resonance`. Left out when the whole label shows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
-    /// knob, toggle, radio, segmented, select, button, light, meter, or
-    /// scope.
+    /// knob, fader, number, toggle, radio, segmented, select, button, light,
+    /// readout, meter, or scope.
     pub kind: &'static str,
     /// Where the widget is drawn. Left out while it is hidden.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,7 +313,7 @@ fn cut_labels(module: &ModuleView) -> Cut {
             TextKind::Port(port) if port.output => module.outputs.get(port.index).map(|p| &p.label),
             TextKind::Port(port) => module.inputs.get(port.index).map(|p| &p.label),
             TextKind::Caption(index) => module.panel.widgets.get(index).map(|w| &w.label),
-            TextKind::Title | TextKind::Unknown | TextKind::Option(..) => None,
+            TextKind::Title | TextKind::Unknown | TextKind::Option(..) | TextKind::Value(..) => None,
         };
         if label.is_some_and(|label| *label != item.content) {
             cut.0.push((item.kind, item.content.into_owned()));
@@ -311,12 +325,15 @@ fn cut_labels(module: &ModuleView) -> Cut {
 fn kind_name(kind: &WidgetViewKind) -> &'static str {
     match kind {
         WidgetViewKind::Knob { .. } => "knob",
+        WidgetViewKind::Fader { .. } => "fader",
+        WidgetViewKind::Number { .. } => "number",
         WidgetViewKind::Toggle => "toggle",
         WidgetViewKind::Radio { .. } => "radio",
         WidgetViewKind::Select { .. } => "select",
         WidgetViewKind::Segmented { .. } => "segmented",
         WidgetViewKind::Light => "light",
-        WidgetViewKind::Meter => "meter",
+        WidgetViewKind::Readout { .. } => "readout",
+        WidgetViewKind::Meter { .. } => "meter",
         WidgetViewKind::Scope => "scope",
         WidgetViewKind::Shape { .. } => "shape",
         WidgetViewKind::Button => "button",
@@ -426,6 +443,8 @@ impl App {
             dropouts: self.alerts.dropout_count(),
             telemetry_dropped,
             input_alert: self.alerts.input_drift(),
+            output_silenced: self.alerts.output_silenced(),
+            output_clipped: self.alerts.output_clipped(),
         }
     }
 
@@ -530,6 +549,9 @@ impl App {
         UiSnapshot {
             title: self.title(),
             status: self.alerts.status().to_string(),
+            status_severity: self.alerts.severity(),
+            errors: self.alerts.kept().to_vec(),
+            learning: self.learn.is_on(),
             undo: self.edits.history.undo_step().map(|s| s.name().to_string()),
             redo: self.edits.history.redo_step().map(|s| s.name().to_string()),
             selection: self.selection.iter().copied().collect(),
@@ -538,6 +560,8 @@ impl App {
             cables,
             inspector: self.inspector_model(),
             help: self.help.as_ref().map(|help| help.model.clone()),
+            recent: self.recent_rows.clone(),
+            question: self.question.as_ref().map(crate::question::Question::model),
             matrix: self.matrix.model(self.controller.graph(), &self.selection),
             stats: self.stats_model(),
             pointer: self.pointer_state(),

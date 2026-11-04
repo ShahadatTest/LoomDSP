@@ -1,7 +1,7 @@
 use super::*;
 use crate::view::severity_colour;
 use iced::Rectangle;
-use loom_core::{EngineConfig, TRANSPORT_MODULE, create_engine};
+use loom_core::{EngineConfig, LoomError, TRANSPORT_MODULE, create_engine};
 use std::time::Duration;
 
 /// A full queue stages fresh modules until the idle engine drains it;
@@ -21,6 +21,59 @@ fn a_full_queue_retries_staged_modules() {
     assert!(!app.retry_commit);
     assert!(!app.controller.has_uncommitted_changes());
     assert_eq!(app.controller.last_report().modules, 4);
+}
+
+/// A full queue fixes itself, so with no undo history to lose it is a warning
+/// and the commit retries. A commit that cannot retry leaves the graph ahead
+/// of the engine, so it stays on screen.
+#[test]
+fn a_commit_that_cannot_retry_is_kept() {
+    let mut app = app();
+    assert!(app.edits.history.undo_step().is_none());
+    app.commit_failed(&LoomError::QueueFull);
+    assert!(app.retry_commit);
+    assert_eq!(app.alerts.severity(), alerts::Severity::Warning);
+    assert!(app.alerts.kept().is_empty());
+
+    app.commit_failed(&LoomError::TooManyModules(4));
+    assert!(!app.retry_commit);
+    assert_eq!(app.alerts.severity(), alerts::Severity::Alarm);
+    assert_eq!(app.alerts.newest_kept().unwrap().cause, alerts::Cause::Other);
+    app.alerts.say("saved");
+    assert!(app.alerts.kept_field().is_some(), "a later message does not hide it");
+}
+
+/// A full queue clears the undo history, and a retry that works does not bring
+/// it back. So the loss stays on screen after the retry's own message.
+#[test]
+fn a_full_queue_keeps_the_loss_of_the_undo_history_on_screen() {
+    let mut app = app_with_engine(EngineConfig {
+        command_capacity: 8,
+        ..EngineConfig::default()
+    });
+    let module = app.controller.add_module("loom.osc.sine").unwrap();
+    app.edit(|app| {
+        app.controller.remove_module(module).unwrap();
+        assert!(app.commit());
+    });
+    assert!(app.edits.history.undo_step().is_some(), "there is history to lose");
+    for _ in 0..8 {
+        app.controller.add_module("loom.osc.sine").unwrap();
+    }
+    assert!(!app.commit());
+    assert!(app.retry_commit, "it still retries");
+    assert!(app.edits.history.undo_step().is_none());
+    assert!(
+        app.alerts.status().contains("undo history cleared"),
+        "{}",
+        app.alerts.status()
+    );
+
+    let _ = app.update(Message::Tick);
+    assert!(!app.retry_commit, "the retry worked");
+    let kept = app.alerts.kept_field().expect("the loss stays on screen");
+    assert!(kept.text.contains("undo history cleared"), "{}", kept.text);
+    assert!(kept.dismissible);
 }
 
 pub(crate) fn app() -> App {
@@ -77,6 +130,8 @@ fn audio_watcher_events_update_the_stats_model() {
         at: now,
         peak: 0.95,
         max: 0.95,
+        silenced: false,
+        clipped: false,
     }));
     assert_eq!(app.stream.load().0, 0.95);
     assert_eq!(app.stream.load().1, 0.95);
@@ -389,9 +444,9 @@ fn test_modules_are_listed_only_with_the_flag() {
         test_modules: true,
         ..app_args()
     });
-    // The two test modules and the patch's Transport.
-    assert_eq!(app.controller.graph().nodes().count(), 3, "{}", app.alerts.status());
-    assert_eq!(app.controller.graph().assignments().count(), 7);
+    // The three test modules and the patch's Transport.
+    assert_eq!(app.controller.graph().nodes().count(), 4, "{}", app.alerts.status());
+    assert_eq!(app.controller.graph().assignments().count(), 10);
     assert!(app.modules.iter().any(|d| d.id == "test.panel"));
 
     let app = self::app();
@@ -1204,6 +1259,61 @@ fn a_running_engine_lights_the_envelope() {
     let _ = app.update(Message::Lights(watch.shown(&mut fades, Instant::now())));
     let level = tile_widget(&app, env, light).position;
     assert!(level > 0.5, "the gate is held: {level}");
+}
+
+/// The watcher wakes the UI when a meter on a display value moves. Dynamics
+/// reads below 0 dB when it turns a signal down, so this fails if the watcher
+/// compares those values as brightness (panel-widgets.md, Meter on a display
+/// value).
+#[test]
+fn the_watcher_sends_a_moving_reduction_meter() {
+    let mut app = app();
+    let source = app.controller.add_module("loom.math.constant").unwrap();
+    app.controller.set_param_named(source, "value", 1.0).unwrap();
+    let dynamics = app.controller.add_module("loom.dyn.dynamics").unwrap();
+    app.commit();
+    let d = app.controller.graph().node(dynamics).unwrap().descriptor;
+    let meter = d.panel.widgets.iter().position(|w| w.bind == "reduction").unwrap();
+    let _ = app.update(Message::Canvas(CanvasEvent::VisibleDisplays(vec![dynamics.0])));
+    let watch = app.watched_lights().expect("the meter is on screen");
+    let entry = watch
+        .lights
+        .iter()
+        .position(|(light, _)| *light == (dynamics.0, meter))
+        .unwrap();
+    let readings = |watch: &lights::Watch| watch.read().iter().map(|&(_, r)| r).collect::<Vec<f32>>();
+
+    app.process(480);
+    let quiet = lights::changed(
+        &vec![None; watch.lights.len()],
+        &readings(&watch),
+        &watch.ranges,
+        &watch.readouts,
+    )
+    .unwrap();
+    assert_eq!(quiet[entry], Some(255), "no signal, no reduction");
+
+    app.controller.connect_named(source, "out", dynamics, "in").unwrap();
+    app.commit();
+    app.process(4_800);
+    let loud = lights::changed(&quiet, &readings(&watch), &watch.ranges, &watch.readouts)
+        .expect("the meter moved, so it is sent");
+    assert!(loud[entry] < quiet[entry], "the bar moved down: {:?}", loud[entry]);
+}
+
+/// Past the end of its range, a meter's bar stops, but its text still says the
+/// value: a closed Gate can fall further than the meter's range.
+#[test]
+fn a_meter_says_its_value_past_its_range() {
+    let mut app = app();
+    let dynamics = app.controller.add_module("loom.dyn.dynamics").unwrap();
+    app.commit();
+    let d = app.controller.graph().node(dynamics).unwrap().descriptor;
+    let meter = d.panel.widgets.iter().position(|w| w.bind == "reduction").unwrap();
+    let _ = app.update(Message::Lights(vec![((dynamics.0, meter), -60.0)]));
+    let widget = tile_widget(&app, dynamics, meter);
+    assert_eq!(widget.position, 0.0);
+    assert_eq!(widget.text, "Reduction: -60.0 dB");
 }
 
 /// Saved tile dimensions survive session loading and patch creation.
@@ -2179,26 +2289,6 @@ fn new_says_it_started_an_empty_patch() {
     assert_eq!(filters.count(), 0, "module {id} went with the old patch");
 }
 
-/// With unsaved changes and no dialog program, New keeps the patch and
-/// says how to save first.
-#[test]
-fn new_without_a_dialog_program_keeps_the_patch() {
-    let (mut app, id, cutoff) = app_with_filter();
-    app.edit(|app| {
-        app.controller.set_param(ModuleId(id), cutoff, 0.5).unwrap();
-        app.commit();
-    });
-    assert!(app.unsaved());
-    files::fake::answer_discard(files::Choice::Unavailable);
-    let _ = app.update(Message::File(FileAction::New));
-    assert!(app.controller.graph().node(ModuleId(id)).is_some(), "the patch stays");
-    assert!(
-        app.alerts.status().starts_with("Unsaved changes."),
-        "{}",
-        app.alerts.status()
-    );
-}
-
 /// A help link to a document that is not bundled leaves the help as it is
 /// and says so.
 #[test]
@@ -2222,7 +2312,12 @@ fn learn_disarms_on_a_second_click_and_bad_params_say_why() {
     assert_eq!(app.alerts.status(), "MIDI learn: click a control to map it");
 
     app.set_param(id, 999, 0.5);
-    assert!(app.alerts.status().starts_with("error: "), "{}", app.alerts.status());
+    assert_eq!(
+        app.alerts.severity(),
+        alerts::Severity::Warning,
+        "{}",
+        app.alerts.status()
+    );
 }
 
 /// The matrix Add form needs both ends before it adds anything.
@@ -2350,4 +2445,238 @@ fn a_panic_that_cannot_be_sent_says_so() {
         "{}",
         app.alerts.status()
     );
+}
+
+/// The bar shows a kept error beside a later message, each with its word, and
+/// the snapshot reports both. The same text never shows twice.
+#[test]
+fn the_status_bar_shows_a_kept_error_beside_later_messages() {
+    let mut ui = crate::ui_test::Ui::with_app(app());
+    ui.app.alerts.error(alerts::Cause::File, "save failed");
+    ui.redraw();
+    assert!(ui.text("Error: save failed").is_some());
+    assert_eq!(
+        ui.app.ui_snapshot().status_severity,
+        alerts::Severity::Alarm,
+        "the latest message is the error"
+    );
+    assert!(ui.text("×").is_some(), "the latest message can be dismissed too");
+
+    ui.app.alerts.say("saved");
+    ui.redraw();
+    assert!(ui.text("Error: save failed").is_some(), "it stays after info");
+    assert!(ui.text("saved").is_some());
+    let snapshot = ui.app.ui_snapshot();
+    assert_eq!(snapshot.status, "saved");
+    assert_eq!(snapshot.status_severity, alerts::Severity::Normal);
+    assert_eq!(snapshot.errors.len(), 1);
+    assert_eq!(snapshot.errors[0].text, "save failed");
+
+    ui.app.alerts.warn("refused");
+    ui.redraw();
+    assert!(ui.text("Warning: refused").is_some());
+    assert_eq!(ui.app.ui_snapshot().status_severity, alerts::Severity::Warning);
+}
+
+/// The × takes a kept error off the bar. A lost output has no ×, and its
+/// severity is in the snapshot's words.
+#[test]
+fn pressing_x_dismisses_a_kept_error_but_a_lost_output_has_none() {
+    let mut ui = crate::ui_test::Ui::with_app(app());
+    ui.app.alerts.error(alerts::Cause::Other, "the recording stopped");
+    ui.app.alerts.say("saved");
+    ui.redraw();
+    let x = ui.text("×").expect("a kept error can be dismissed").center();
+    ui.move_to(x);
+    ui.press();
+    ui.release();
+    assert!(ui.app.alerts.kept().is_empty());
+    assert!(ui.text("Error: the recording stopped").is_none());
+
+    ui.app.alerts.error(alerts::Cause::AudioOutput, "Audio: lost");
+    ui.redraw();
+    assert!(ui.text("Error: Audio: lost").is_some());
+    assert!(ui.text("×").is_none(), "only sound or a choice ends a lost output");
+    let json = serde_json::to_value(ui.app.ui_snapshot()).unwrap();
+    assert_eq!(json["status_severity"], "error");
+    assert_eq!(json["errors"][0]["cause"], "audio_output");
+    assert_eq!(json["errors"][0]["dismissible"], false);
+}
+
+/// Learn mode shows its word for as long as it is on, whatever the status
+/// message says.
+#[test]
+fn the_status_bar_says_learning_while_learn_mode_is_on() {
+    let mut ui = crate::ui_test::Ui::with_app(app());
+    assert!(ui.text("Learning").is_none());
+    assert!(!ui.app.ui_snapshot().learning);
+    ui.send(Message::Learn(learn::Message::Toggle));
+    ui.app.alerts.say("Mapped CC 74 to SVF Cutoff");
+    ui.redraw();
+    assert!(ui.text("Learning").is_some(), "the next message does not hide it");
+    assert!(ui.app.ui_snapshot().learning);
+    ui.send(Message::Learn(learn::Message::Toggle));
+    ui.redraw();
+    assert!(ui.text("Learning").is_none());
+}
+
+/// A disabled toolbar button says why in its hover text. The harness does
+/// not reach tooltips, so this reads what the view passes to them.
+#[test]
+fn disabled_toolbar_buttons_say_why_in_hover_text() {
+    let app = app();
+    assert!(app.midi.is_none(), "no audio in this test");
+    assert_eq!(app.hold_hover(), Some(crate::view::HOLD_DISABLED));
+    assert!(app.rig.recent.files().is_empty());
+    assert!(app.recent_hover().contains("disabled"), "{}", app.recent_hover());
+}
+
+/// Presses a key as a real keyboard does, with its text, and returns the
+/// messages it sends.
+fn press_key(
+    ui: &mut crate::ui_test::Ui,
+    key: iced::keyboard::Key,
+    text: Option<&str>,
+    modifiers: iced::keyboard::Modifiers,
+) -> Vec<Message> {
+    ui.step(&[iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+        modified_key: key.clone(),
+        key,
+        physical_key: iced::keyboard::key::Physical::Unidentified(iced::keyboard::key::NativeCode::Unidentified),
+        location: iced::keyboard::Location::Standard,
+        modifiers,
+        text: text.map(Into::into),
+        repeat: false,
+    })])
+}
+
+/// A new patch with its Authors box in focus. It leaves the pointer over the
+/// canvas when `over_canvas` is true, as after a person clicks the box and
+/// moves the mouse away, and over the box otherwise.
+fn typing_in_authors(over_canvas: bool) -> crate::ui_test::Ui {
+    let mut ui = crate::ui_test::Ui::open("sine.ron");
+    let _ = ui
+        .app
+        .update(Message::Canvas(loom_canvas::CanvasEvent::Select(Vec::new())));
+    ui.redraw();
+    let label = ui.text("Authors, one per line").expect("the patch form shows");
+    let field = Point::new(label.center_x(), label.y + label.height + 14.0);
+    ui.move_to(field);
+    ui.press();
+    ui.release();
+    assert!(ui.text_field_focused(), "the click focused the box");
+    if over_canvas {
+        ui.move_to(Point::new(400.0, 700.0));
+    }
+    ui
+}
+
+/// Messages the canvas sent.
+fn from_canvas(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|m| matches!(m, Message::Canvas(_)))
+        .map(|m| format!("{m:?}"))
+        .collect()
+}
+
+/// Typing in a text box acts on the text alone, wherever the pointer is. A
+/// space used to toggle Run as well, which stopped the music, and Tab and A
+/// acted on the patch behind the box (clipboard.md, rule 7; panels.md,
+/// Keyboard without a mouse).
+#[test]
+fn keys_stay_out_of_the_canvas_while_typing() {
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let keys = [
+        ("Space", Key::Named(Named::Space), Some(" "), Modifiers::default()),
+        ("A", Key::Character("a".into()), Some("a"), Modifiers::default()),
+        ("F", Key::Character("f".into()), Some("f"), Modifiers::default()),
+        ("Tab", Key::Named(Named::Tab), None, Modifiers::default()),
+        ("Backspace", Key::Named(Named::Backspace), None, Modifiers::default()),
+        ("Enter", Key::Named(Named::Enter), None, Modifiers::default()),
+        ("Left", Key::Named(Named::ArrowLeft), None, Modifiers::default()),
+        ("Cmd+V", Key::Character("v".into()), None, Modifiers::COMMAND),
+    ];
+    for over_canvas in [false, true] {
+        for (name, key, text, modifiers) in keys.clone() {
+            let mut ui = typing_in_authors(over_canvas);
+            let messages = press_key(&mut ui, key, text, modifiers);
+            assert_eq!(
+                from_canvas(&messages),
+                Vec::<String>::new(),
+                "{name}, pointer over canvas: {over_canvas}"
+            );
+        }
+    }
+}
+
+/// The space still reaches the text, and Escape hands the keys back: focus
+/// is read on each press, so Space is the Run shortcut again.
+#[test]
+fn escape_from_a_text_box_gives_keys_back_to_the_canvas() {
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let mut ui = typing_in_authors(true);
+    let typed = press_key(&mut ui, Key::Named(Named::Space), Some(" "), Modifiers::default());
+    assert!(
+        typed.iter().any(|m| matches!(m, Message::PatchInfo(_))),
+        "the box took the space: {typed:?}"
+    );
+
+    let escaped = press_key(&mut ui, Key::Named(Named::Escape), None, Modifiers::default());
+    assert_eq!(from_canvas(&escaped), Vec::<String>::new(), "Escape only left the box");
+    assert!(!ui.text_field_focused(), "Escape left the box");
+
+    let after = press_key(&mut ui, Key::Named(Named::Space), Some(" "), Modifiers::default());
+    assert!(
+        after
+            .iter()
+            .any(|m| matches!(m, Message::Canvas(loom_canvas::CanvasEvent::ToggleRun))),
+        "Space toggles Run again: {after:?}"
+    );
+}
+
+/// Tab moves through one view's text fields and wraps, sent as a real key.
+/// It stays inside the patch browser, so focus cannot land on the form behind
+/// it. The browser focuses its search field by a task, which sends no message,
+/// so the key cannot wait for the app to have heard of the focus.
+#[test]
+fn tab_moves_between_the_fields_of_one_view() {
+    use iced::advanced::widget::Id;
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let tab = Key::Named(Named::Tab);
+    let [authors, tags] = crate::patch_info::TEXT_FIELDS;
+    let mut ui = typing_in_authors(false);
+    assert_eq!(ui.focused_field(), Some(Id::new(authors)), "the click focused Authors");
+
+    ui.tap(tab.clone(), Modifiers::default());
+    assert_eq!(ui.focused_field(), Some(Id::new(tags)), "Tab goes to Tags");
+    ui.tap(tab.clone(), Modifiers::default());
+    assert_eq!(ui.focused_field(), Some(Id::new(authors)), "Tab wraps to Authors");
+    ui.tap(tab.clone(), Modifiers::SHIFT);
+    assert_eq!(ui.focused_field(), Some(Id::new(tags)), "Shift-Tab wraps back to Tags");
+
+    let _ = press_key(&mut ui, Key::Named(Named::Escape), None, Modifiers::default());
+    ui.app.patches = Some(crate::patches::PatchBrowser::new(1, PathBuf::from("unread")));
+    ui.redraw();
+    let [search, author] = crate::patches::TEXT_FIELDS;
+    ui.focus(search);
+    ui.tap(tab.clone(), Modifiers::default());
+    assert_eq!(ui.focused_field(), Some(Id::new(author)));
+    ui.tap(tab, Modifiers::default());
+    assert_eq!(ui.focused_field(), Some(Id::new(search)), "wrapped inside the browser");
+}
+
+/// Tab goes forward and Shift-Tab back, wrapping at both ends. It takes three
+/// fields to see this: with two, both directions land on the same one.
+#[test]
+fn tab_steps_forward_and_shift_tab_back() {
+    use crate::editing::field_after;
+    use iced::advanced::widget::Id;
+    let fields = ["one", "two", "three"];
+    let step = |from: &'static str, backwards| field_after(&fields, Id::new(from), backwards);
+    assert_eq!(step("one", false), Id::new("two"));
+    assert_eq!(step("three", false), Id::new("one"), "forward wraps");
+    assert_eq!(step("two", true), Id::new("one"));
+    assert_eq!(step("one", true), Id::new("three"), "backward wraps");
+    assert_eq!(step("other", false), Id::new("other"), "a field not listed stays");
 }

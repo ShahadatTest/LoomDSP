@@ -48,7 +48,7 @@ Every panel uses the same widget set.
 
 *Why one set:* users learn each control once. A new widget is added to the set, not drawn by one module, so every module and every panel can use it.
 
-The widgets after M1, with their bindings, modulation display, keyboard use, and the catalogue entries that need them, are planned in [Panel widgets](panel-widgets.md) (Draft, [ADR-0024](../adr/0024-widgets-follow-the-kind-of-value.md)). It names the slider "fader", the selector "select list", and the graph "curve", and adds a number, a readout, an XY scope, and a waveform.
+The widgets after M1, with their bindings, modulation display, keyboard use, and the catalogue entries that need them, are specified in [Panel widgets](panel-widgets.md) (Agreed, [ADR-0024](../adr/0024-widgets-follow-the-kind-of-value.md)). It names the slider "fader", the selector "select list", and the graph "curve", and adds a number, a readout, an XY scope, and a waveform.
 
 The [read-only shape preview](panel-widgets.md#read-only-shape-preview) is an agreed first slice of the curve widget. Envelope, LFO, and Ladder place it above their controls. Each puts its choices in a row under the full-width shape ([Panel layout](#panel-layout), principle 2); Envelope's Mode is a segmented control. The preview shows a schematic result from parameters, keeps the tile's drag gesture, and has no editing handles. Built-in tiles use knobs for single ranged parameters by default; a fader needs a specific task such as comparing mixer levels.
 
@@ -290,7 +290,7 @@ The first display module that shows a signal over time.
 | `level` | Level | -10 to 10 | 0 | The trigger level while `auto` is off. [Control ranges](control-ranges.md) -1 to 1 (default) and -10 to 10, like the scope's vertical ranges ([#329](https://github.com/brylie/LoomDSP/issues/329)). |
 | `slope` | Slope | 0 Rising, 1 Falling | 0 | Which edge starts the trace ([#329](https://github.com/brylie/LoomDSP/issues/329)). |
 
-- Its panel: a knob for `window`, a toggle for `auto`, and a knob for `level`, and below them the scope widget (9 by 5 grid units, bound to `out`, no caption), added in #62. Code: `SCOPE` in `loom-modules/src/display.rs`, `Trigger` in `loom-app/src/live.rs`, and `loom-app/src/probe_menu.rs`.
+- Its panel: the scope widget at the top (9 by 5 grid units, bound to `out`, no caption), added in #62, and below it a knob for `window`, a toggle for `auto`, and a knob for `level`. Code: `SCOPE` in `loom-modules/src/display.rs`, `Trigger` in `loom-app/src/live.rs`, and `loom-app/src/probe_menu.rs`.
 - The parameters never change the audio. They tell the app how to draw the trace.
 - *Why an auto toggle:* most signals trigger well at their midpoint, including envelopes and pitch with an offset, which never cross 0. A fixed level is for picking one edge of a complex wave. A toggle keeps both without a knob that means two things.
 
@@ -343,7 +343,7 @@ A right-click opens a menu for what is under the pointer. Right-clicking a tile 
 - [x] The scope module passes its input through, bit for bit. It has a reference test and a block-size check.
 - [ ] A falling slope starts the trace on a falling edge, and a fixed level of 3 triggers on a signal between 2 and 5 (tests in `crates/loom-app/src/live.rs`).
 - [ ] Level meter: a peak of 1.0 lights the clip light until it is clicked; the peak hold shows the highest peak in dB; a double-click resets both (`Ui` harness).
-- [ ] A patch that makes infinity at the output counts silenced samples and shows the error message for 10 seconds after the last one; clipping with safety Off shows the warning (test).
+- [x] A patch that makes infinity at the output counts silenced samples and shows the error message for 10 seconds after the last one; clipping with safety Off shows the warning (test).
 - [x] Its parameters are `window`, `auto`, and `level`, with the ranges above, and its panel has a knob, a toggle, and a knob for them.
 - [x] `ScopeTrace` with a fixed level triggers on that level, and runs free when nothing crosses it. With `auto` on it behaves as before.
 - [x] Right-clicking an output or a cable opens the menu. A right-drag pans and opens no menu. Right-clicking a tile, an input, or empty canvas opens none.
@@ -434,7 +434,7 @@ The canvas already hides port labels and titles below a size on screen. Panels u
 **Status:** Implemented. Code: `ControlGeometry` in `loom-canvas/src/controls.rs`, `loom-app/src/lights.rs`.
 
 - **Control values have their own GPU buffer.** Changing a value rewrites only that buffer, never the tiles, ports, or cables. *Why:* ADR-0010's rule that GPU data for the patch is rebuilt only when the patch changes.
-- Lights read the display table on a timer of 30 Hz, but only while a module with lights is on screen at a zoom where lights are drawn. A frame is drawn only when a shown brightness changes by at least 1/256.
+- Lights read the display table on a timer of 30 Hz, but only while a module with lights is on screen at a zoom where lights are drawn. A frame is drawn only when a shown brightness, or a meter's place in its range, changes by at least 1/256. Past the end of its range, a meter's bar stops but its text does not, so steps of the same size still count.
 - The timer runs on its own thread and sends the UI a message only when a light changes. *Why:* in Iced every message redraws the window, so a plain 30 Hz timer message would draw 30 frames a second even when nothing moves. The canvas reports which modules with lights are on screen, so the app watches only those.
 - Nothing visible changing means no frame.
 
@@ -500,9 +500,9 @@ The whole app redraws only when something visible changes ([#90](https://github.
 - An overload notice from the device that comes before the stream's first callback is not a dropout. No audio was rendered yet, so none was lost. macOS sends one as a stream starts with a very small buffer (32 frames), while the device switches to it. *Why:* counting it turned the count red each time a performer chose a small buffer, for a glitch that never happened. A count that cries wolf gets ignored. (Found on BlackHole 2ch, 2026-10-24, [#26](https://github.com/brylie/LoomDSP/issues/26).)
 - Load is shown normally below 70%, in amber from 70%, and in red from 90%. The colour follows the highest load since the last tick, and the "max" is the highest in the last 10 seconds ([M1 additions](#audio-load-colour)).
 - The dropout count is red for 10 seconds after it grows.
-- **Redraw.** A thread reads the audio stats four times a second and wakes the UI only when the bar would change: the load or its maximum to the shown 1%, the dropout count, the end of the red time, or the telemetry drops. The load number changes at most twice a second. *Why:* in Iced every message redraws the window, so a timer that refreshed the bar drew two frames a second in an idle patch ([#90](https://github.com/brylie/LoomDSP/issues/90)).
+- **Redraw.** A thread reads the audio stats four times a second and wakes the UI only when the bar would change: the load or its maximum to the shown 1%, the dropout count, the end of the red time, the telemetry drops, or an output warning starting or ending. The load number changes at most twice a second. *Why:* in Iced every message redraws the window, so a timer that refreshed the bar drew two frames a second in an idle patch ([#90](https://github.com/brylie/LoomDSP/issues/90)).
 - *Why:* a performer needs a warning before a problem is audible (FR-PERF-04), and must notice when one just happened. A count that stayed red forever would soon be ignored.
-- **Silenced and clipped output** (Agreed, M2, [#130](https://github.com/brylie/LoomDSP/issues/130), 2026-11-01). The engine counts output samples it turned from NaN or infinity into silence, and samples it clipped to -1 to 1, in two atomics in `EngineStats` (an atomic add on the audio thread, nothing else). The stats bar shows **Output: bad samples silenced** in the error style, and **Output clipped** in the warning style, each for 10 seconds after the last such sample, like the dropout count. Hover text gives the counts since the engine started. *Why:* since #123 a patch that makes NaN just goes quiet, and the player cannot tell why. With the output limiter on, clipping is rare, so the clip message mostly appears with output safety Off.
+- **Silenced and clipped output** (Agreed, M2, [#130](https://github.com/brylie/LoomDSP/issues/130), 2026-11-01). The engine counts output samples it turned from NaN or infinity into silence, and samples it clipped to -1 to 1, in two atomics in `EngineStats` (an atomic add on the audio thread, nothing else). The stats bar shows **Output: bad samples silenced** in the error style, and **Output clipped** in the warning style, each for 10 seconds after the last such sample, like the dropout count. Hover text gives the counts since the engine started. The watcher thread owns the timing and tells the UI when a warning starts or ends, and the warnings clear when the stream or engine changes. Each stream gets a new engine, so a count already there at the watcher's first read is new, and it shows. *Why the watcher:* it wakes the UI only when the bar would change, so a second timer in the UI would end the warning while bad samples continue. *Why:* since #123 a patch that makes NaN just goes quiet, and the player cannot tell why. With the output limiter on, clipping is rare, so the clip message mostly appears with output safety Off.
 
 ### Acceptance criteria: level meters and audio load
 
@@ -666,17 +666,20 @@ What M1 builds. The rest of this spec is M2.
 
 ### Keyboard without a mouse
 
-([#101](https://github.com/brylie/LoomDSP/issues/101).) Closes the gap that nothing selects a module by key. Keys have three owners, tried in this order, and the first one that has a use for the key takes it:
+([#101](https://github.com/brylie/LoomDSP/issues/101).) Closes the gap that nothing selects a module by key. Keys have four owners, tried in this order, and the first one that has a use for the key takes it:
 
-1. **A focused panel control** (knob, toggle, radio, select list, button).
-2. **The canvas** (selection, movement, clipboard, undo).
-3. **Global keys** (Space for Run).
+1. **A text field or text box with focus.** The owners below get no key press, wherever the pointer is, whether or not the field uses the key ([Keys in a text field](panel-widgets.md)). *Why:* a space in an author's name must not stop the music, and a person typing should never change the patch behind the field. Escape leaves the field, and the other owners then have the keys again. Where a view has several text fields, Tab and Shift-Tab move between them in reading order and wrap at the ends: Authors and Tags in the patch form, and search and Author in the patch browser. Focus never leaves the view, so it cannot land behind an overlay. In any other field, Tab closes the field and moves the canvas's focus.
+2. **A focused panel control** (knob, toggle, radio, select list, button).
+3. **The canvas** (selection, movement, clipboard, undo).
+4. **Global keys** (Space for Run).
+
+The table below applies when no text field has focus.
 
 | Key | Panel control focused | Module selected | Nothing selected |
 |---|---|---|---|
 | Tab, Shift-Tab | Next or previous control of the module; after the last, the next module | Next or previous module in reading order | Selects the first or last module |
-| Enter | Acts on the control (toggle, press) | Focuses the module's first control | Nothing |
-| Space | Acts on a toggle, radio, or button. A knob does not take it | Toggles Run | Toggles Run |
+| Enter | Acts on the control (toggle, press). On a one-number control, opens the field for [typing a value](panel-widgets.md#typing-a-value). In MIDI learn mode, arms it | Focuses the module's first control | Nothing |
+| Space | Acts on a toggle, radio, or button. A one-number control does not take it | Toggles Run | Toggles Run |
 | Arrow keys | Change the value ([Interaction](#interaction-68)) | Move the selected modules one grid unit; Shift moves 10 | Nothing |
 | Escape | Clears control focus | Clears the selection | Nothing (after the other uses of Escape: a drag, then pinned lines) |
 
@@ -719,7 +722,7 @@ What M1 builds. The rest of this spec is M2.
 
 - **The handle.** A small grip at the bottom-right corner of a tile that has a **growable** widget (a scope, a meter, an XY scope, later a spectrum or curve). Other tiles have no handle. Dragging it changes the tile's size and snaps to the grid. The cursor shows a resize cursor over it.
 - **Minimum and maximum.** The minimum is the size the panel declares (the tile cannot be smaller than its layout). The maximum is 64 by 64 grid units.
-- **What grows.** Only growable widgets. They take all extra width and height. Other widgets keep their size and position, top left.
+- **What grows.** Only growable widgets. They take all extra width and height. Other widgets keep their size and position, top left, except that a widget below a scope moves down with the scope's bottom edge. *Why:* the scope sits at the top of its panel, so the controls under it would otherwise be covered, and a tall scope is the reason to resize one. A meter does not grow over a widget. A widget below it, in the meter's columns, stops it growing taller. A widget to its right, in the meter's rows, stops it growing wider. With nothing below it to stop it growing taller, a widget past its lower right corner also stops it growing wider, so it grows taller only. A hidden widget counts, so a meter does not jump when a setting shows or hides one. *Why:* a panel can place a meter above a control, as Dynamics does, and a covered control cannot be read or reached.
 - **Ports.** Inputs stay on the left edge and outputs on the right, spread evenly over the new height, in port order. Cable ends, hit-testing, and hover follow the new size.
 - **Saved.** The patch file gets an optional `size: (w, h)` next to the position, in grid units. A tile without one has its declared size. Files without the field load unchanged (ADR-0008).
 - **Undo.** One resize drag is one undo step. The size is part of the clipboard: paste keeps it.
@@ -728,6 +731,8 @@ What M1 builds. The rest of this spec is M2.
 
 ### Acceptance criteria: M1 additions
 
+- [x] Tab and Shift-Tab move between the fields of the patch form and of the patch browser, wrap at the ends, and stay inside the overlay (`tab_moves_between_the_fields_of_one_view`).
+- [x] With a text box in focus, Space, A, F, Tab, Backspace, Enter, Left, and Cmd+V reach no canvas action, with the pointer over the box or over the canvas (`keys_stay_out_of_the_canvas_while_typing`). After Escape, Space toggles Run again (`escape_from_a_text_box_gives_keys_back_to_the_canvas`).
 - [x] Choice names: the registry refuses a wrong count, an empty name, and names on a continuous parameter. The inspector shows "Toggle" and "Momentary" for Button's `mode` and a slider for a parameter without names. No module hard-codes names in its panel.
 - [x] A one-sample trigger into a Clock Divide or Phase Trigger output light lights it, and it fades in 120 ms. No frames are drawn after the fade.
 - [x] A transport-following input shows the clock mark with no cable, loses it when a cable is connected, and has it back when the cable is removed.

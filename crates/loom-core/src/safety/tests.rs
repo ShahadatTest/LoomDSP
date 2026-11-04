@@ -39,10 +39,11 @@ fn the_fade_starts_at_zero_and_rises_in_a_straight_line() {
 
 #[test]
 fn clean_mode_ramps_the_gain_down_before_a_peak() {
-    let mut limiter = Limiter::new(RATE);
-    let lookahead = limiter.lookahead;
+    let mut limiter = limiter(RATE);
+    limiter.set_mode(limiter_mode(OutputSafety::Clean));
+    let lookahead = limiter.lookahead();
     let input: Vec<f32> = (0..400).map(|i| if i < 200 { 0.5 } else { 2.0 }).collect();
-    let out: Vec<f32> = input.iter().map(|&x| limiter.tick(x, x, true).0).collect();
+    let out: Vec<f32> = input.iter().map(|&x| limiter.tick(x, x).0).collect();
     assert!(out[..lookahead].iter().all(|&s| s == 0.0));
     assert!(out.iter().all(|s| s.abs() <= CEILING));
     // The quiet samples just before the step come out turned down a
@@ -57,18 +58,18 @@ fn clean_mode_ramps_the_gain_down_before_a_peak() {
 
 #[test]
 fn low_latency_mode_turns_down_the_sample_that_goes_over() {
-    let mut limiter = Limiter::new(RATE);
-    assert_eq!(limiter.tick(0.5, -0.25, false), (0.5, -0.25));
-    assert_eq!(limiter.tick(2.0, -1.0, false), (CEILING, -CEILING / 2.0));
+    let mut limiter = limiter(RATE);
+    assert_eq!(limiter.tick(0.5, -0.25), (0.5, -0.25));
+    assert_eq!(limiter.tick(2.0, -1.0), (CEILING, -CEILING / 2.0));
     // Then it recovers slowly.
-    let (next, _) = limiter.tick(0.5, 0.0, false);
+    let (next, _) = limiter.tick(0.5, 0.0);
     assert!(next < 0.25);
 }
 
 #[test]
 fn a_large_held_offset_decays_to_zero() {
     for sample_rate in [44_100.0, 48_000.0, 96_000.0, 192_000.0] {
-        let mut dc = DcBlocker::new(sample_rate);
+        let mut dc = dc_blocker(sample_rate);
         let mut output = 0.0;
         for _ in 0..sample_rate as usize {
             output = dc.tick(INPUT_LIMIT);
@@ -138,4 +139,25 @@ fn a_fade_out_while_clean_waits_for_its_first_sample_is_silent_at_once() {
     let out = run(&mut stage, &[0.5; 4]);
     assert_eq!(out, [0.0; 4]);
     assert!(stage.is_silent());
+}
+
+/// The stage counts what it turned to silence and what it clipped.
+#[test]
+fn process_counts_silenced_and_clipped_samples() {
+    let mut stage = SafetyStage::new(OutputSafety::Off, RATE);
+    let frames = (RATE * 0.02) as usize;
+    let mut left = vec![0.0; frames];
+    let mut right = vec![0.0; frames];
+    stage.process(&mut left, &mut right);
+
+    let mut left = [f32::NAN, 2.0, 0.5, -3.0];
+    let mut right = [f32::INFINITY, 0.5, f32::NEG_INFINITY, 0.5];
+    let counts = stage.process(&mut left, &mut right);
+    assert_eq!(
+        counts,
+        OutputCounts {
+            silenced: 3,
+            clipped: 2
+        }
+    );
 }

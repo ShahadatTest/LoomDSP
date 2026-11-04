@@ -11,7 +11,7 @@ use iced::{Color, Point, Theme};
 use loom_canvas::PanelValues;
 use loom_core::{Controller, EngineConfig, EngineParts, ModuleId, TRANSPORT_MODULE, create_engine};
 use loom_host_desktop::AudioOutput;
-use loom_patch::Patch;
+use loom_patch::{Metadata, Patch};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Instant;
@@ -36,7 +36,10 @@ impl App {
     /// devices (`docs/design/autosave.md`, `docs/design/preferences.md`).
     pub(crate) fn boot_with(args: Args, prompt: &mut dyn recovery::Prompt, host: Rc<dyn devices::Host>) -> Self {
         let (store, mut notes) = settings::open_store(&args.devices);
+        let (recent, recent_note) = crate::recent::RecentList::open(store.path());
+        notes.extend(recent_note);
         let mut rig = settings::Rig::new(host, store, args.devices.clone(), args.output_safety.is_some());
+        rig.recent = recent;
         let mut session_folder = None;
         let mut restore = None;
         if let Some(root) = args.recovery_root() {
@@ -126,7 +129,7 @@ impl App {
         // The compile report gives way to anything that needs reading.
         let mut keep = !status.is_empty();
         if keep {
-            app.alerts.say(status);
+            app.alerts.error(alerts::Cause::File, status);
         }
         app.document.start_autosave(session_folder);
         if let Some((state, orphan, _)) = recovered {
@@ -134,10 +137,12 @@ impl App {
             keep = true;
         }
         if !notes.is_empty() {
+            let notes = notes.join(" ");
             if keep {
-                notes.insert(0, app.alerts.take_status());
+                app.alerts.append_warning(&format!(" {notes}"));
+            } else {
+                app.alerts.warn(notes);
             }
-            app.alerts.say(notes.join(" "));
         }
         app
     }
@@ -158,8 +163,7 @@ impl App {
         });
         for note in self.document.load_notes() {
             if note.contains("not in this version:") {
-                self.alerts.append(" ");
-                self.alerts.append(note);
+                self.alerts.append_warning(&format!(" {note}"));
             }
         }
         self.document.adopt(orphan);
@@ -180,7 +184,7 @@ impl App {
         let mut sizes = BTreeMap::new();
         let mut original_unknown_positions = BTreeMap::new();
         let mut notes = Vec::new();
-        let mut load = |patch: &Patch, controller: &mut Controller| -> Result<String, String> {
+        let mut load = |patch: &Patch, controller: &mut Controller| -> Result<Metadata, String> {
             notes = patch.load_into(controller).map_err(|e| e.to_string())?;
             for m in &patch.modules {
                 if controller
@@ -197,23 +201,28 @@ impl App {
                     sizes.insert(m.id, size);
                 }
             }
-            Ok(patch.name.clone())
+            Ok(patch.metadata())
         };
-        let (name, file, stamp) = match source {
+        let named = |name: String| Metadata {
+            name,
+            ..Metadata::default()
+        };
+        let fresh = matches!(source, Source::Empty);
+        let (info, file, stamp) = match source {
             Source::Generated(n) => {
                 layout::generate(&mut controller, n).map_err(|e| format!("generate failed: {e}"))?;
                 layout::generated_layout(&controller, &mut positions);
-                (format!("Generated ({n} modules)"), None, None)
+                (named(format!("Generated ({n} modules)")), None, None)
             }
             Source::File(path) => {
                 // Stamped before reading: a change after this shows as a change.
                 let stamp = recovery::Stamp::of(path);
                 let patch = Patch::load(path).map_err(|e| e.to_string())?;
-                let name = load(&patch, &mut controller)?;
-                (name, Some(path.to_path_buf()), stamp)
+                let info = load(&patch, &mut controller)?;
+                (info, Some(path.to_path_buf()), stamp)
             }
             Source::Recovered(patch) => (load(&patch, &mut controller)?, None, None),
-            Source::Empty => ("Untitled".to_string(), None, None),
+            Source::Empty => (named("Untitled".to_string()), None, None),
         };
         // Every patch has one Transport (clock.md). A loaded file gets one
         // in `load_into`; a new or generated patch gets it here.
@@ -237,7 +246,8 @@ impl App {
             positions,
             unknown_positions,
             sizes,
-            name,
+            info,
+            fresh,
             file,
             stamp,
             notes,
@@ -265,12 +275,14 @@ impl App {
             positions,
             unknown_positions,
             sizes,
-            name,
+            info,
+            fresh,
             file,
             stamp,
             notes,
         } = session;
-        let mut status = notes.join("; ");
+        let status = notes.join("; ");
+        let mut recording_stopped = None;
         let load_notes = notes;
 
         // Every MIDI input plays the patch, and the "Hold note" button works
@@ -287,7 +299,7 @@ impl App {
                 match output.start(engine) {
                     Ok(audio) => {
                         if let Some(e) = refused {
-                            status = rig.end_recording(&e);
+                            recording_stopped = Some(rig.end_recording(&e));
                         }
                         (Some(audio), Some(midi), label, None)
                     }
@@ -317,6 +329,8 @@ impl App {
             scene,
             gestures: gestures::Gestures::default(),
             values,
+            value_draft: None,
+            text_focus: crate::editing::TextFocus::default(),
             lights: BTreeMap::new(),
             run_driven,
             meter_levels: std::collections::HashMap::new(),
@@ -325,7 +339,7 @@ impl App {
             full_traces: true,
             visible_displays: Vec::new(),
             selection: BTreeSet::new(),
-            document: document::Document::new(name, file, stamp, load_notes),
+            document: document::Document::new(info, file, stamp, load_notes),
             generation,
             stream: stream::Stream::new(
                 audio,
@@ -357,7 +371,7 @@ impl App {
             rig,
             midi,
             holding: false,
-            alerts: alerts::Alerts::new(status),
+            alerts: alerts::Alerts::with_notes(status),
             // The app's tests load the test modules but never list them.
             modules: if args.test_modules {
                 registry(true).iter().collect()
@@ -365,6 +379,13 @@ impl App {
                 loom_modules::registry().iter().collect()
             },
             browser: None,
+            patch_info: crate::patch_info::State::new(&Metadata::default()),
+            chooser: None,
+            patches: None,
+            question: None,
+            recent_rows: None,
+            drops: Vec::new(),
+            patches_open: 0,
             help: None,
             tile_menu: None,
             browser_key: 0,
@@ -386,14 +407,26 @@ impl App {
             matrix: matrix::State::default(),
             still: None,
             step_name: None,
+            history_key: None,
         };
+        if let Some(stopped) = recording_stopped {
+            app.alerts.error(alerts::Cause::Other, stopped);
+        }
         // A stream that failed to start took the engine with it.
         app.keep_engine_idle();
         app.sync_audio_input();
         app.send_panic_trigger();
         if let Some(error) = app.connect_midi(first_midi, connect_midi) {
-            app.alerts.say(error);
+            app.alerts.warn(error);
         }
+        // A new patch credits the user and takes their default licence
+        // (patch-metadata.md, Defaults).
+        if fresh {
+            let saved = app.rig.store.saved();
+            let (author, licence) = (saved.author.clone(), saved.licence.clone());
+            app.document.start_new(&author, licence.as_deref());
+        }
+        app.patch_info = crate::patch_info::State::new(app.document.info());
         // A patch just loaded is the one on disk.
         app.edits.history.mark_saved();
         app.document.mark_loaded(app.current_patch());

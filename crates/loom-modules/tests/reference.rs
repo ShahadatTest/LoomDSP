@@ -7,7 +7,8 @@
 
 use loom_core::{MidiEvent, ModuleRole, TransportSettings};
 use loom_modules::{
-    ALL, clock, display, env, filter, io, level, lfo, logic, math, midi, mix, osc, phase, rand, time, transport, ui,
+    ALL, clock, display, dynamics, env, eq, filter, gate, io, level, lfo, logic, math, midi, mix, osc, phase, rand,
+    route, time, transport, ui,
 };
 use loom_test::{Harness, Signal, reference};
 
@@ -432,6 +433,84 @@ fn phase_reset() {
     }
 }
 
+/// Reference render for `loom.phase.shift`: a phase moved by the knob and by a
+/// slow wave on the offset input.
+#[test]
+fn phase_shift() {
+    Harness::new(&phase::SHIFT)
+        .seconds(0.1)
+        .param("offset", 0.25)
+        .input("phase", Signal::phase(40.0))
+        .input(
+            "offset",
+            Signal::from_fn(|frame| 0.1 * (frame as f32 * std::f32::consts::TAU * 15.0 / 48_000.0).sin()),
+        )
+        .check(reference!("phase_shift"));
+}
+
+/// Reference render for `loom.phase.reverse`: a phase run backward.
+#[test]
+fn phase_reverse() {
+    Harness::new(&phase::REVERSE)
+        .seconds(0.1)
+        .input("phase", Signal::phase(40.0))
+        .check(reference!("phase_reverse"));
+}
+
+/// Reference render for `loom.ui.macro`: the knob's value on the output, with
+/// no glide from its first frame.
+#[test]
+fn macro_value() {
+    let render = Harness::new(&ui::MACRO)
+        .seconds(0.02)
+        .param("value", 0.6)
+        .check(reference!("macro"));
+    assert!(render.output("out").iter().all(|&value| value == 0.6));
+}
+
+/// Reference render for `loom.gate.euclid`, driven by a phase: each hit lands on
+/// the same sample at every block size (the harness compares them).
+#[test]
+fn euclid_phase() {
+    Harness::new(&gate::EUCLID)
+        .seconds(0.1)
+        .param("steps", 8.0)
+        .param("hits", 3.0)
+        .input("phase", Signal::phase(20.0))
+        .check(reference!("euclid_phase"));
+}
+
+/// A harness for `loom.route.selector`: eight tones, one per input, and a step
+/// every 100 frames.
+fn selector_harness() -> Harness {
+    let harness = Harness::new(&route::SELECTOR).seconds(0.1).param("count", 8.0).input(
+        "step",
+        Signal::from_fn(|frame| if frame % 100 == 50 { 1.0 } else { 0.0 }),
+    );
+    (1..=8).fold(harness, |harness, n| {
+        harness.input(
+            &format!("in{n}"),
+            Signal::from_fn(move |frame| (frame as f32 * n as f32 * 0.03).sin() * 0.5),
+        )
+    })
+}
+
+/// Reference render for `loom.route.selector` in Step mode: each step lands on
+/// the same sample at every block size (the harness compares them).
+#[test]
+fn selector_step() {
+    selector_harness().check(reference!("selector_step"));
+}
+
+/// Reference render for `loom.route.selector` in Random mode: the picks are the
+/// same at every block size.
+#[test]
+fn selector_random() {
+    selector_harness()
+        .param("mode", 2.0)
+        .check(reference!("selector_random"));
+}
+
 /// Reference render for `loom.rand.chance`: one clock into lane 1 drives all
 /// four lanes, each with its own chance. Every lane fires on the same frames
 /// at every block size, and the same seed gives the same choices.
@@ -504,6 +583,9 @@ fn every_dsp_module_has_a_reference_test() {
         &mix::CROSSFADE,
         &mix::JOIN,
         &mix::SPLIT,
+        &dynamics::DYNAMICS,
+        &eq::EQ,
+        &filter::CROSSOVER,
         &io::AUDIO_IN,
         &logic::COMPARE,
         &logic::LOGIC,
@@ -529,6 +611,11 @@ fn every_dsp_module_has_a_reference_test() {
         &display::SCOPE,
         &logic::DIVIDE,
         &ui::BUTTON,
+        &ui::MACRO,
+        &gate::EUCLID,
+        &route::SELECTOR,
+        &phase::SHIFT,
+        &phase::REVERSE,
         &time::DELAY,
         &time::ALLPASS,
         &clock::CLOCK,
@@ -802,6 +889,81 @@ fn split() {
         .seconds(0.02)
         .input("in", Signal::from_fn(|frame| (frame as f32 * 0.01).sin()))
         .check(reference!("split"));
+}
+
+/// A decaying tone, loud at the start and quiet at the end, so a curve acts on
+/// both sides of its threshold.
+fn falling_tone(frame: usize) -> f32 {
+    (frame as f32 * 0.05).sin() * (-(frame as f32) / 2_000.0).exp()
+}
+
+/// Every mode of Dynamics, with its own settings.
+#[test]
+fn dynamics() {
+    for (mode, path) in [
+        (0.0, reference!("dynamics_compress")),
+        (1.0, reference!("dynamics_limit")),
+        (2.0, reference!("dynamics_expand")),
+        (3.0, reference!("dynamics_gate")),
+        (4.0, reference!("dynamics_duck")),
+    ] {
+        Harness::new(&dynamics::DYNAMICS)
+            .seconds(0.1)
+            .input("in", Signal::from_fn(falling_tone))
+            .param("mode", mode)
+            .param("threshold", -12.0)
+            .param("attack", 0.001)
+            .param("release", 0.01)
+            .check(path);
+    }
+}
+
+/// Dynamics with a sidechain, RMS detection, level match, and a parallel mix.
+#[test]
+fn dynamics_sidechain_and_match() {
+    Harness::new(&dynamics::DYNAMICS)
+        .seconds(0.1)
+        .input("in", Signal::from_fn(|frame| (frame as f32 * 0.05).sin()))
+        .input("sidechain", Signal::gate(0.02, 0.06))
+        .param("detect", 1.0)
+        .param("match", 1.0)
+        .param("mix", 0.75)
+        .param("output", 3.0)
+        .check(reference!("dynamics_sidechain"));
+}
+
+/// EQ with every section at work, and a slope change partway through from the
+/// knob's value.
+#[test]
+fn eq() {
+    Harness::new(&eq::EQ)
+        .seconds(0.05)
+        .input(
+            "in",
+            Signal::from_fn(|frame| (frame as f32 * 0.05).sin() + 0.5 * (frame as f32 * 0.9).sin()),
+        )
+        .param("low_slope", 2.0)
+        .param("low_cut", 100.0)
+        .param("low_gain", 6.0)
+        .param("mid_gain", -9.0)
+        .param("mid_q", 3.0)
+        .param("high_gain", 4.0)
+        .param("high_slope", 1.0)
+        .check(reference!("eq"));
+}
+
+/// The three bands of a Crossover.
+#[test]
+fn crossover() {
+    Harness::new(&filter::CROSSOVER)
+        .seconds(0.05)
+        .input(
+            "in",
+            Signal::from_fn(|frame| {
+                (frame as f32 * 0.02).sin() + (frame as f32 * 0.3).sin() + (frame as f32 * 1.5).sin()
+            }),
+        )
+        .check(reference!("crossover"));
 }
 
 /// A disconnected audio input is silent.

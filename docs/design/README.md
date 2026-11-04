@@ -55,6 +55,7 @@ Copy [template.md](template.md). Keep it to one feature. Link the ADR, requireme
 | Specification | Decision | Status |
 |---|---|---|
 | [Arrangement](arrangement.md) | [ADR-0012](../adr/0012-arrangement-from-phase-driven-primitives.md) | Draft, M3 |
+| [Dynamics, EQ, and Crossover](dynamics-eq-crossover.md) | [ADR-0035](../adr/0035-pure-dsp-algorithms-in-loom-dsp.md) | Implemented, M2 |
 | [Telemetry](telemetry.md) | [ADR-0001](../adr/0001-lock-free-control-audio-boundary.md) | Implemented, M1 |
 | [Panels](panels.md) | [ADR-0013](../adr/0013-modules-carry-their-own-panel.md), [ADR-0025](../adr/0025-one-design-language-and-derived-panels.md) | Module panels on tiles, level meters, and audio load Implemented (M1); labels and hover text Implemented; M1 additions (choice names, trigger lights, clock mark, load colour, keyboard, activity, scope trace, resizable tiles) Agreed; panel editor, exposed controls, context menu, scope slope, meter clip and hold, output warnings Agreed (M2); rest Draft |
 | [Panel widgets](panel-widgets.md) | [ADR-0024](../adr/0024-widgets-follow-the-kind-of-value.md) | Agreed, M2; shape preview and compact select list Implemented |
@@ -66,6 +67,7 @@ Copy [template.md](template.md). Keep it to one feature. Link the ADR, requireme
 | [Port ranges](port-ranges.md) | None (builds on [ADR-0007](../adr/0007-polymorphic-signal-model.md)) | Tier 1 Agreed (M1), Tiers 2 and 3 Agreed (M2) |
 | [Module test harness](module-test-harness.md) | [ADR-0002](../adr/0002-graph-execution-and-feedback.md) | Implemented, M1; reset check Agreed, M2 |
 | [Clock and transport](clock.md) | [ADR-0015](../adr/0015-one-transport-per-patch.md) | Engine sections, Clock Divide, and Phase Trigger Implemented (M1); Transport, Clock, Phase Scale, and rules 10 and 11 Agreed (M1); MIDI clock and Clock to phase Agreed (M2); rest Draft |
+| [DSP algorithms](dsp-algorithms.md) | [ADR-0035](../adr/0035-pure-dsp-algorithms-in-loom-dsp.md) | Implemented |
 | [Delay line and all-pass](delay.md) | [ADR-0001](../adr/0001-lock-free-control-audio-boundary.md), [ADR-0002](../adr/0002-graph-execution-and-feedback.md), [ADR-0017](../adr/0017-primitives-traits-and-abstractions.md), [ADR-0020](../adr/0020-inferred-channel-count.md) | Implemented, M1 |
 | [Port and parameter text](port-and-parameter-text.md) | [ADR-0016](../adr/0016-ports-and-parameters-carry-their-own-text.md) | Implemented, M1 |
 | [Open, Save, and Save As](files.md) | None (builds on [ADR-0008](../adr/0008-patch-format-ron.md)) | Implemented, M1; recent files and dropping a file Agreed, M2 |

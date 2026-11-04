@@ -40,7 +40,7 @@ How a user takes back and replays edits on the canvas, the inspector, and the pa
 | Press undo or redo while a gesture is in progress | Nothing happens. The gesture finishes first. |
 | Open a patch, or start a new one | The history is cleared. |
 
-The shortcuts work anywhere in the window, except while a text field is being edited. A text field has its own undo. *Why not only when the canvas has focus:* the app has no focus for the canvas or the inspector as a whole, and the user expects undo to work wherever they last clicked.
+The shortcuts work anywhere in the window, except while a text field or text box has keyboard focus: then they do nothing. The text widgets have no undo of their own, and undoing a canvas edit behind the field would surprise the user. *Why not only when the canvas has focus:* the app has no focus for the canvas or the inspector as a whole, and the user expects undo to work wherever they last clicked.
 
 ### After an undo or redo
 
@@ -98,6 +98,7 @@ The exact wording can change while building. Each step must have a name.
 | Transport: tempo, time signature, start and stop, position | Performance controls that the user changes while playing. Tempo and time signature are saved in the patch, but in the first version they stay out of the history. *Why:* the user changes them to play, often while the transport runs, and undoing a knob turn should never jump the tempo back. Revisit if users expect them in the history. |
 | Parameter changes that come from a hardware MIDI control | The hardware control is its own undo: move it back. Undo cannot move a physical knob, so taking back a fader move would leave the sound and the fader apart, and the next touch would jump. It would also bury the user's own edits and drop their redo steps. See [Mapped parameters](#mapped-parameters). Revisit when pickup modes (FR-MIDI-09) remove the jump. |
 | Saving | Writes the file; the patch does not change. |
+| Patch info: authors, tags, and licence ([patch metadata](patch-metadata.md#patch-info)) | Typed text and small picks that are easy to redo by hand. The edit marks the patch unsaved and is saved with it. While the authors box or tag field has focus, the undo shortcuts do nothing (see above). Revisit if users expect patch info in the history. |
 | Learn mode on or off, and arming a parameter | A mode, not an edit. Undo while a parameter is armed disarms it first, then undoes. |
 
 ### Mapped parameters
@@ -133,7 +134,7 @@ The history keeps the last **200 steps**. When a new step would make it longer, 
 7. **Undo and redo are edits on the controller, never on the audio thread.** They call the same `Controller` methods an edit calls and then commit. They keep the real-time rules. *Why:* ADR-0001.
 8. **One commit per step.** A step that changes several things is applied, then committed once, so the engine swaps one schedule. *Why:* the user hears one change, not a set of partial ones.
 9. **Redo is dropped by a new edit.** The history is a line, not a tree. *Why:* a tree is hard to show and rarely needed.
-10. **Undo never fails silently.** Before a step is applied, the app checks what it can: the module kinds are in the registry, and there are enough free module slots. A removed module's slot is free only after the next schedule swap, so the check counts the slots in use, not only the modules in the graph. If the check fails, nothing is applied, the step stays in the history, and the status bar says why. If a `Controller` call still fails while the step is applied (for example the command queue is full), the history is cleared and the status bar says why. *Why:* a half-applied step that stays in the history would make every later undo wrong.
+10. **Undo never fails silently.** Before a step is applied, the app checks what it can: the module kinds are in the registry, and there are enough free module slots. A removed module's slot is free only after the next schedule swap, so the check counts the slots in use, not only the modules in the graph. If the check fails, nothing is applied, the step stays in the history, and the status bar says why. If a `Controller` call still fails while the step is applied (for example the command queue is full), the history is cleared and the status bar says why. *Why:* a half-applied step that stays in the history would make every later undo wrong. A failed send to the engine also clears the history, and the status bar keeps saying so as an error until the player dismisses it, even after a full queue drains and the retry works ([visual system, Status messages](visual-system.md#status-messages)). *Why:* the retry brings the change to the engine, not the history back.
 11. **Hardware controls are not history.** Parameter values set by MIDI mappings never become steps ([Mapped parameters](#mapped-parameters)). *Why:* the hardware control is its own undo, undo cannot move it back, and a performer must not lose their last real edit to a fader wiggle.
 
 ## How it works

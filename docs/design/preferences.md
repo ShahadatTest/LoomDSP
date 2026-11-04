@@ -60,6 +60,11 @@ RON, like patches (ADR-0008):
 | `version` | `1` | `1` |
 | `output_safety` | `"low-latency"`, `"clean"`, `"off"` | `"low-latency"` |
 | `show_activity` | `true`, `false` | `true` |
+| `author` | Your name, as text, for example `"Ada Lovelace"` | `""` (not set) |
+| `default_license` | `Some("<SPDX expression>")`, or `None` | `None` (no default) |
+| `library` | `Some("<folder>")`, or `None` | `None`: `LoomDSP/Library` in your Documents folder |
+
+`author`, `default_license`, and `library` are described in [patch metadata](patch-metadata.md#defaults-preferences). A `default_license` that is not a valid SPDX expression falls back to no default, with the usual note, so the app never starts a patch with a licence the player did not choose.
 
 Values use the same spelling as the `--output-safety` flag. *Why:* one name for each mode in the docs, the flag, and the file, so a player who edits the file by hand does not have to learn a second spelling.
 
@@ -115,7 +120,7 @@ If the player changes the setting in the Preferences window during a run started
 
 It opens as a modal panel over the canvas, like the app's other dialogs. Esc or a **Close** button closes it. Audio keeps playing while it is open.
 
-The panel has two sections: Output safety, described here, and [Audio and MIDI devices](#audio-and-midi-devices).
+The panel has two sections: Output safety, described here, and [Audio and MIDI devices](#audio-and-midi-devices). A **New patches** section at the end holds **Your name** (saved on Enter or when the window closes) and the **Licence** default, with a **Choose** button that opens the [licence chooser](patch-metadata.md#licence-chooser).
 
 **Output safety.** Three choices, one selected:
 
@@ -145,7 +150,7 @@ With `--no-audio`, there is no engine to tell. The choice is saved and used by t
 
 ## Rules
 
-1. **Preferences belong to the machine, never the patch.** Opening, saving, or creating a patch never reads or writes preferences, and a patch cannot hold one. *Why:* ADR-0019, rule 2. A patch from someone else must not change the player's protection.
+1. **Preferences belong to the machine, never the patch.** Opening, saving, or creating a patch never writes preferences, and a patch cannot hold one. Opening a patch never reads them. Only the [patch metadata](patch-metadata.md#defaults-preferences) preferences are read for a patch: a new patch copies `author` and `default_license` into its own fields once, Save reads `author` to offer credit, and Save As starts in `library`. The patch keeps the copied values, not a link to the preferences. *Why:* ADR-0019, rule 2. A patch from someone else must not change the player's protection.
 2. **The preferences store lives in `loom-app`.** No engine crate reads or writes the file. *Why:* hard rule 6. The engine crates stay portable and file-free. The app reads the file and passes plain values into `EngineConfig` and the `Controller`.
 3. **A problem with the file never blocks start and never turns protection off.** A file that cannot be read or parsed gives the defaults for every field. A field with a value the app does not know falls back to its default alone, and the other fields keep their values. Defaults are the safe choice. *Why:* see Reading the file.
 4. **The app writes only on a change, atomically.** *Why:* see Writing the file.
@@ -298,7 +303,7 @@ When a flag sets a value, a line under that control says `Set by --device for th
 
 - **D1. Devices belong to the machine, never the patch.** A patch cannot name a device, rate, buffer size, or MIDI input. *Why:* the same patch must play on any machine. The issue asks for it.
 - **D2. A fallback is never saved.** When the saved device, rate, or buffer size cannot be used at start, the app plays with something else and leaves the file alone. *Why:* the interface left at the studio is plugged in again tomorrow, and the player should not have to choose it again.
-- **D3. The app always starts and always plays if any output exists.** A missing saved device is a status bar message, not a modal and not silence. *Why:* the same as Rule 3.
+- **D3. The app always starts and always plays if any output exists.** A missing saved device is a status bar message, not a modal and not silence. *Why:* the same as Rule 3. A named device lost while the app runs is different: the app waits for it ([device changes](device-changes.md)).
 - **D4. Only what the device reports is offered.** Sample rates are the common rates (44100, 48000, 88200, 96000, 176400, 192000 Hz) that fall in one of the device's reported 32-bit float ranges. Buffer sizes are the powers of two from 16 to 4096 in the device's reported range. When a device does not report a buffer range, the app offers 64 to 2048 and falls back to the device default if the device refuses one. *Why:* a choice that fails when picked teaches the player to distrust the menu. Some systems report a huge rate range, so the list of common rates keeps the menu short. The engine gives the same output at any block size (hard rule 2), so the buffer size only changes latency and load, never the sound.
 - **D5. A device, rate, or buffer change opens the new device before stopping the old one, and fades out before it stops.** *Why:* a failed change must leave sound playing, and a stop mid-signal clicks. Open, New, and quit fade out the same way ([output-safety.md](output-safety.md), rule 14).
 - **D6. A restart keeps the patch and the session, and resets module state.** *Why:* see State that does not survive a restart.

@@ -17,6 +17,7 @@ mod control;
 mod controls;
 mod devices;
 mod document;
+mod documents;
 mod editing;
 mod edits;
 #[cfg(test)]
@@ -30,6 +31,7 @@ mod input_watch;
 mod inspector;
 mod layout;
 mod learn;
+mod licence_chooser;
 mod lights;
 mod live;
 mod matrix;
@@ -37,11 +39,15 @@ mod modulation;
 mod monitor;
 mod panic;
 mod param;
+mod patch_info;
+mod patches;
 mod pointer;
 mod preferences;
 mod probe_menu;
 #[cfg(test)]
 mod qa_tests;
+mod question;
+mod recent;
 mod recovery;
 mod scene;
 mod screenshot;
@@ -219,7 +225,12 @@ fn main() -> iced::Result {
         }
         return Ok(());
     }
-    let result = iced::application(move || App::new(args.clone()), App::update, App::view)
+    let start = move || {
+        let mut app = App::new(args.clone());
+        app.remember_opened_at_start(&args);
+        app
+    };
+    let result = iced::application(start, App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
@@ -239,6 +250,8 @@ const WINDOW: Size = Size::new(1440.0, 900.0);
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// The player pressed × on a kept error.
+    DismissError(alerts::Cause),
     Canvas(CanvasEvent),
     /// The eligible inspector parameter currently under an output drag.
     DropRow(Option<(u32, usize)>),
@@ -303,6 +316,12 @@ enum Message {
         found: control::Found,
         then: control::AfterSearch,
     },
+    /// Whether a text field has focus, for a `type` command.
+    TypeFocus {
+        call: control::Call,
+        text: String,
+        focused: bool,
+    },
     Animate(bool),
     Frame(Instant),
     /// A slow tick while a recording runs, to notice a write error.
@@ -334,6 +353,13 @@ enum Message {
     Key(iced::keyboard::Event),
     /// Take back the last step (`docs/design/undo.md`).
     Undo,
+    /// An undo or redo shortcut, after checking whether a text field has
+    /// focus. While one has, the shortcut does nothing: the field is
+    /// being edited, and undo would change the patch behind it.
+    HistoryKey {
+        redo: bool,
+        typing: bool,
+    },
     /// Replay the step undo took back.
     Redo,
     /// An exact parameter value, in the parameter's units, sent as a knob
@@ -344,6 +370,26 @@ enum Message {
         index: usize,
         value: f32,
     },
+    /// Text typed in an inspector value field (panel-widgets.md, Typing a
+    /// value).
+    ValueText {
+        module: u32,
+        index: usize,
+        text: String,
+    },
+    /// Enter in an inspector value field.
+    ValueSubmit {
+        module: u32,
+        index: usize,
+    },
+    /// Escape with a draft in a value field: it is dropped.
+    ValueDraftClear,
+    /// Something may have moved text focus, such as a press. Ask the widgets.
+    TextFocusCheck,
+    /// Which text field has focus, from the widgets.
+    TextFocus(editing::TextFocus),
+    /// Tab was pressed. It closes a text field on the main view.
+    TextFieldTab,
     /// A choice name was picked in the inspector: value `min + choice` of
     /// the parameter, as one undo step (panels.md, Choice names).
     Choice {
@@ -405,6 +451,22 @@ enum Message {
     SelectModule(u32),
     /// A message for the Preferences window (`docs/design/preferences.md`).
     Preferences(settings::Message),
+    /// An edit in patch info (`docs/design/patch-metadata.md`).
+    PatchInfo(patch_info::Message),
+    /// A message for the open licence chooser.
+    Licence(licence_chooser::Message),
+    /// A message for the open patches browser.
+    Patches(patches::Message),
+    /// An answer or a key for the open question (`docs/design/files.md`).
+    Question(question::Message),
+    /// The toolbar's **Recent** button.
+    OpenRecent,
+    /// A message for the open recent list.
+    Recent(recent::Message),
+    /// A file was dropped on the window. The window sends one per file.
+    FileDropped(PathBuf),
+    /// The moment for collecting a drop is over.
+    DropsDone,
     /// The clipboard was read for a paste at a world point, not yet snapped
     /// (`docs/design/clipboard.md`).
     /// `generation` is the engine's when the read began: a result that
@@ -462,7 +524,106 @@ impl Message {
                 | Self::MidiPoll
                 | Self::BenchDone
                 | Self::UnknownLabelDraft { .. }
+                | Self::TextFocusCheck
+                | Self::TextFocus(_)
         )
+    }
+
+    /// True for what still runs while a question is open: the question
+    /// itself, and everything that keeps the music going and the screen
+    /// honest. A hardware knob keeps working, and a stray click or key does
+    /// not reach the patch (files.md, Asking before losing work).
+    ///
+    /// No wildcard, on purpose: a new message must choose a side.
+    fn allowed_during_question(&self) -> bool {
+        match self {
+            Self::Question(_)
+            | Self::Panic
+            | Self::MidiPoll
+            | Self::AudioPoll
+            | Self::InputAudio(_)
+            | Self::BenchDone
+            | Self::Control(_)
+            | Self::ControlFrame(_)
+            | Self::Located { .. }
+            | Self::TypeFocus { .. }
+            | Self::Frame(_)
+            | Self::Tick
+            | Self::Audio(_)
+            | Self::LiveFrame
+            | Self::Lights(_)
+            | Self::Meters(_)
+            | Self::Telemetry(_)
+            | Self::Autosave
+            | Self::Midi
+            // The answer to a question asked before this one opened.
+            | Self::TextFocus(_)
+            // These say they were ignored, so they must arrive.
+            | Self::FileDropped(_)
+            | Self::DropsDone => true,
+            // The canvas ends what it was doing when it loses input. Those
+            // must land, or a button stays held behind the question.
+            Self::Canvas(event) => matches!(
+                event,
+                CanvasEvent::ButtonReleased { .. }
+                    | CanvasEvent::GestureEnd
+                    | CanvasEvent::ArrowGroupEnd
+                    | CanvasEvent::AssignCancel
+            ),
+            // A close asks over the browser, and Cancel returns to it: rows
+            // read meanwhile must not go missing.
+            Self::Patches(message) => matches!(message, patches::Message::Found { .. }),
+            Self::Key(_)
+            | Self::DropRow(_)
+            | Self::Param { .. }
+            | Self::OpenBrowser
+            | Self::ShowHelp
+            | Self::ShowShortcuts
+            | Self::ShowModuleHelp(_)
+            | Self::CloseHelp
+            | Self::HelpExample
+            | Self::HelpLink(_)
+            | Self::CloseTileMenu
+            | Self::Browser(_)
+            | Self::ProbeMenu(_)
+            | Self::AddProbe { .. }
+            | Self::HoldNote
+            | Self::File(_)
+            | Self::Measure(_)
+            | Self::Animate(_)
+            | Self::Learn(_)
+            | Self::Unmap { .. }
+            | Self::Undo
+            | Self::HistoryKey { .. }
+            | Self::Redo
+            | Self::ParamValue { .. }
+            | Self::ValueText { .. }
+            | Self::ValueSubmit { .. }
+            | Self::ValueDraftClear
+            | Self::TextFocusCheck
+            | Self::TextFieldTab
+            | Self::Choice { .. }
+            | Self::Range { .. }
+            | Self::SliderReleased
+            | Self::AddModulation { .. }
+            | Self::Assign { .. }
+            | Self::Depth { .. }
+            | Self::Polarity { .. }
+            | Self::Enabled { .. }
+            | Self::Unassign(_)
+            | Self::UnknownLabelDraft { .. }
+            | Self::UnknownLabelApply { .. }
+            | Self::Matrix(_)
+            | Self::MatrixKey(_)
+            | Self::SelectModule(_)
+            | Self::Preferences(_)
+            | Self::PatchInfo(_)
+            | Self::Licence(_)
+            | Self::OpenRecent
+            | Self::Recent(_)
+            | Self::DismissError(_)
+            | Self::Pasted { .. } => false,
+        }
     }
 }
 
@@ -478,6 +639,8 @@ pub(crate) enum FileAction {
     Save,
     /// Ask for a file and save to it.
     SaveAs,
+    /// Open your patches browser (`docs/design/patch-metadata.md`).
+    Browse,
     /// The window asked to close: quit, unless the player keeps the patch.
     Close,
 }
@@ -501,6 +664,12 @@ struct App {
     /// Live values of panel controls and lights, apart from the scene so a
     /// knob turn does not rebuild tiles or cables.
     values: PanelValues,
+    /// Text typed in an inspector value field, not committed yet.
+    value_draft: Option<controls::ValueDraft>,
+    /// Which text field has focus. While one does, the canvas leaves the keys
+    /// to it. Kept from the widget tree, because a text field does not say when
+    /// it loses focus.
+    text_focus: editing::TextFocus,
     /// Last brightness of each light, by module and widget.
     lights: BTreeMap<lights::Light, f32>,
     /// True when the last commit had a cable on the Transport's `run`
@@ -548,6 +717,22 @@ struct App {
     modules: Vec<&'static ModuleDescriptor>,
     /// The module browser, while it is open.
     browser: Option<browser::Browser>,
+    /// Patch info's fields being typed in (`docs/design/patch-metadata.md`).
+    patch_info: patch_info::State,
+    /// The licence chooser, while it is open.
+    chooser: Option<licence_chooser::Chooser>,
+    /// Your patches browser, while it is open.
+    patches: Option<patches::PatchBrowser>,
+    /// The rows of the recent list, while it is open. Read when it opens.
+    recent_rows: Option<Vec<recent::Row>>,
+    /// Files of a drop being collected, for a moment after the first.
+    drops: Vec<PathBuf>,
+    /// The question over everything else, while one is open. While it is,
+    /// most messages are dropped (`Message::allowed_during_question`).
+    question: Option<question::Question>,
+    /// Counts openings of the patches browser, so files read for an
+    /// earlier one are dropped.
+    patches_open: u64,
     /// Open module help.
     help: Option<help::Help>,
     /// Right-clicked tile and its menu position.
@@ -595,6 +780,9 @@ struct App {
     /// The name for the step the edit in progress makes, when a command
     /// names it (cut, paste, duplicate) rather than what changed.
     step_name: Option<String>,
+    /// An undo (`false`) or redo (`true`) shortcut waiting for the check
+    /// that no text field has focus.
+    history_key: Option<bool>,
 }
 
 /// Where a patch comes from.
@@ -617,7 +805,10 @@ struct Session {
     unknown_positions: BTreeMap<u32, (Option<(f32, f32)>, Point)>,
     /// Tile dimensions carried with the patch between sessions.
     sizes: BTreeMap<u32, (u8, u8)>,
-    name: String,
+    /// The patch's name and metadata (patch-metadata.md).
+    info: loom_patch::Metadata,
+    /// True for a new, empty patch, which takes the user's defaults.
+    fresh: bool,
     file: Option<PathBuf>,
     stamp: Option<recovery::Stamp>,
     /// What loaded differently from the file, such as a saved control
@@ -629,6 +820,7 @@ impl App {
     /// The patch as it would be saved now.
     fn current_patch(&self) -> Patch {
         let mut patch = Patch::from_graph(self.document.name(), self.controller.graph());
+        patch.set_metadata(self.document.info().clone());
         for m in &mut patch.modules {
             m.position = self.positions.get(&m.id).map(|p| (p.x.round(), p.y.round()));
             if let Some((original, initial)) = self.unknown_positions.get(&m.id)
@@ -650,7 +842,11 @@ impl App {
         }
         let current = self.current_patch();
         if let Some(line) = self.document.autosave(now, current) {
-            self.alerts.say(line);
+            if line == recovery::AUTOSAVE_WORKS {
+                self.alerts.say(line);
+            } else {
+                self.alerts.warn(line);
+            }
         }
     }
 
@@ -743,7 +939,8 @@ impl App {
         if let Some(error) = self.rig.recorder.as_ref().and_then(loom_host_desktop::Recorder::error)
             && self.alerts.recording_stopped()
         {
-            self.alerts.say(format!("The recording stopped: {error}"));
+            self.alerts
+                .error(alerts::Cause::Other, format!("The recording stopped: {error}"));
             eprintln!("loom-app: {}", self.alerts.status());
         }
     }
@@ -835,15 +1032,11 @@ impl App {
         let live: std::collections::HashSet<ProbeId> = self.live.probes().collect();
         self.meter_levels.retain(|probe, _| live.contains(probe));
         if let Err(e) = self.controller.commit() {
-            self.alerts.say(format!("error: {e}"));
+            self.alerts.warn(e.to_string());
         }
     }
 
     fn report(&mut self) {
-        if let Some(lost) = &self.rig.lost_audio {
-            self.alerts.say(lost.message.clone());
-            return;
-        }
         let report = self.controller.last_report();
         let inserted = report.inserted_delays().count();
         self.alerts.say(match report.loops.len() {
@@ -857,7 +1050,7 @@ impl App {
         // Warn only on entry into the overflow state, including after a
         // patch has returned below the table limit.
         if self.alerts.live_values_full(report.without_live_value > 0) {
-            self.alerts.append(&format!(
+            self.alerts.append_warning(&format!(
                 "; {} modulated {} show no live value (table full)",
                 report.without_live_value,
                 if report.without_live_value == 1 {
@@ -889,12 +1082,26 @@ impl App {
             Message::Tick => FrameCause::Tick,
             Message::LiveFrame => FrameCause::Live,
             Message::Meters(_) | Message::Telemetry(_) | Message::Lights(_) => FrameCause::Meters,
-            Message::Control(_) | Message::ControlFrame(_) | Message::Located { .. } => FrameCause::Control,
+            Message::Control(_) | Message::ControlFrame(_) | Message::Located { .. } | Message::TypeFocus { .. } => {
+                FrameCause::Control
+            }
             Message::Canvas(_) | Message::Key(_) | Message::File(FileAction::Close) => FrameCause::Input,
             Message::Frame(_) => FrameCause::Forced,
             _ => FrameCause::Other,
         };
         loom_canvas::stats::request_frame(cause);
+        if self.question.is_some() && !message.allowed_during_question() {
+            return Task::none();
+        }
+        // A field can go with the view, so any input while one has focus asks
+        // again. Live readings and frames do not change what the view holds.
+        let ask_focus = matches!(message, Message::TextFocusCheck)
+            || (self.text_focus.any
+                && !matches!(message, Message::TextFocus(_))
+                && !matches!(
+                    cause,
+                    FrameCause::Tick | FrameCause::Live | FrameCause::Meters | FrameCause::Forced
+                ));
         // A mode change the engine's full queue refused goes again now.
         self.send_pending_safety();
         if !message.keeps_patch() {
@@ -905,6 +1112,32 @@ impl App {
         let was_help_open = self.help.is_some();
         let task = match message {
             Message::Browser(message) => self.browser_message(message),
+            Message::Patches(message) => self.patches_message(message),
+            Message::Question(message) => {
+                self.question_message(message);
+                Task::none()
+            }
+            Message::File(FileAction::Browse) => self.open_patches(),
+            Message::Key(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+                if modifiers.command()
+                    && modifiers.shift()
+                    && matches!(key.as_ref(), iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("o"))
+                    && self.no_overlay() =>
+            {
+                self.open_patches()
+            }
+            Message::Key(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
+                modifiers,
+                ..
+            }) if !modifiers.command() && !modifiers.alt() && !self.tab_fields().is_empty() => {
+                iced::advanced::widget::operate(editing::StepFocus {
+                    fields: self.tab_fields(),
+                    backwards: modifiers.shift(),
+                    current: None,
+                })
+                .discard()
+            }
             Message::Canvas(CanvasEvent::Paste { world }) => {
                 let generation = self.generation;
                 iced::clipboard::read().map(move |text| Message::Pasted {
@@ -917,17 +1150,38 @@ impl App {
             Message::Matrix(event) => self.matrix_message(event),
             Message::MatrixKey(key) => self.matrix_key_message(key),
             Message::ControlFrame(now) => self.control_frame(now),
+            Message::TextFieldTab => self.text_field_tab(),
+            Message::TextFocus(focus) => self.text_focus_changed(focus),
+            Message::ValueSubmit { module, index } => self.value_submit(module, index),
             Message::Located {
                 call,
                 target,
                 found,
                 then,
             } => self.located(call, &target, &found, then),
+            Message::TypeFocus { call, text, focused } => {
+                self.type_after_focus_check(call, &text, focused);
+                Task::none()
+            }
             message if self.clipboard_key(&message).is_some() => self.clipboard_command(&message),
             message => {
                 self.handle(message);
                 Task::none()
             }
+        };
+        // An undo or redo shortcut asks the window whether a text field has
+        // focus first.
+        let task = if ask_focus {
+            Task::batch([task, editing::text_focus().map(Message::TextFocus)])
+        } else {
+            task
+        };
+        let task = match self.history_key.take() {
+            Some(redo) => Task::batch([
+                task,
+                editing::text_field_focused().map(move |typing| Message::HistoryKey { redo, typing }),
+            ]),
+            None => task,
         };
         self.drain_idle_engine();
         // The audio callback, or the idle engine above, makes room for the
@@ -951,6 +1205,54 @@ impl App {
         } else {
             task
         }
+    }
+
+    /// True when no overlay or dialog panel is open over the canvas.
+    fn no_overlay(&self) -> bool {
+        self.browser.is_none()
+            && self.help.is_none()
+            && self.rig.window.is_none()
+            && self.chooser.is_none()
+            && self.patches.is_none()
+            && self.question.is_none()
+            && self.recent_rows.is_none()
+    }
+
+    /// Opens your patches browser over the library folder, which is read
+    /// on a thread (patch-metadata.md, Your patches browser).
+    fn open_patches(&mut self) -> Task<Message> {
+        // The folder is made on first use, so a new player's library
+        // starts empty rather than missing.
+        let Some(folder) = self.library_folder() else {
+            if self.rig.store.saved().library_folder().is_none() {
+                self.alerts
+                    .warn("No library folder: set `library` in the preferences file.".to_string());
+            }
+            return Task::none();
+        };
+        self.browser = None;
+        self.patches_open += 1;
+        let (browser, task) = patches::PatchBrowser::open(self.patches_open, folder);
+        self.patches = Some(browser);
+        task.map(Message::Patches)
+    }
+
+    /// Handles a patches browser message: keep it open, close it, or open
+    /// a patch, asking about unsaved changes first.
+    fn patches_message(&mut self, message: patches::Message) -> Task<Message> {
+        let Some(open) = self.patches.as_mut() else {
+            return Task::none();
+        };
+        let (outcome, task) = open.update(message);
+        match outcome {
+            patches::Outcome::Stay => {}
+            patches::Outcome::Close => self.patches = None,
+            patches::Outcome::Open(path) => {
+                self.patches = None;
+                self.after_discard(question::AfterDiscard::OpenPath(path));
+            }
+        }
+        task.map(Message::Patches)
     }
 
     /// Handles a browser message: keep it open, close it, or add a module.
@@ -980,7 +1282,7 @@ impl App {
                 app.selection = BTreeSet::from([id.0]);
                 app.commit();
             }
-            Err(e) => app.alerts.say(format!("Could not add {}: {e}", descriptor.name)),
+            Err(e) => app.alerts.warn(format!("Could not add {}: {e}", descriptor.name)),
         });
     }
 
@@ -989,7 +1291,7 @@ impl App {
     fn add_probe(&mut self, probe: probe_menu::Probe, output: loom_canvas::PortRef, world: Point) {
         let Some(descriptor) = self.modules.iter().copied().find(|d| d.id == probe.id()) else {
             self.alerts
-                .say(format!("Cannot {}: no module `{}`", probe.verb(), probe.id()));
+                .warn(format!("Cannot {}: no module `{}`", probe.verb(), probe.id()));
             return;
         };
         let tiles: Vec<iced::Rectangle> = self.scene.modules().iter().map(|m| m.bounds()).collect();
@@ -1006,7 +1308,7 @@ impl App {
             .node(source.module)
             .is_some_and(|node| source.port < node.descriptor.outputs.len());
         if !exists {
-            self.alerts.say(format!("Cannot {}: the output is gone", probe.verb()));
+            self.alerts.warn(format!("Cannot {}: the output is gone", probe.verb()));
             return;
         }
         self.close_slider_gesture();
@@ -1015,7 +1317,7 @@ impl App {
             let id = match app.controller.add_module(descriptor.id) {
                 Ok(id) => id,
                 Err(e) => {
-                    app.alerts.say(format!("Cannot {}: {e}", probe.verb()));
+                    app.alerts.warn(format!("Cannot {}: {e}", probe.verb()));
                     return;
                 }
             };
@@ -1024,7 +1326,7 @@ impl App {
                 // so the edit makes no step.
                 let _ = app.controller.remove_module(id);
                 app.commit();
-                app.alerts.say(format!("Cannot {}: {e}", probe.verb()));
+                app.alerts.warn(format!("Cannot {}: {e}", probe.verb()));
                 return;
             }
             app.positions.insert(id.0, corner);
@@ -1043,7 +1345,11 @@ impl App {
             Message::Browser(_)
             | Message::Control(_)
             | Message::ControlFrame(_)
+            | Message::TextFieldTab
+            | Message::TextFocus(_)
+            | Message::ValueSubmit { .. }
             | Message::Located { .. }
+            | Message::TypeFocus { .. }
             | Message::Matrix(_)
             | Message::MatrixKey(_) => {}
             Message::ShowHelp => {
@@ -1085,11 +1391,8 @@ impl App {
                 let example = self.help.as_ref().and_then(|help| help.model.example.clone());
                 if let Some(example) = example {
                     match Patch::from_ron(&example) {
-                        Ok(patch) if self.can_discard() => {
-                            self.replace(Source::Recovered(Box::new(patch)));
-                        }
-                        Ok(_) => {}
-                        Err(error) => self.alerts.say(format!("Could not open example: {error}")),
+                        Ok(patch) => self.after_discard(question::AfterDiscard::Example(Box::new(patch))),
+                        Err(error) => self.alerts.warn(format!("Could not open example: {error}")),
                     }
                 }
             }
@@ -1101,12 +1404,36 @@ impl App {
                 if let Some(descriptor) = descriptor {
                     self.help = Some(help::Help::new(descriptor));
                 } else {
-                    self.alerts.say(format!("Linked document is not bundled: {link}"));
+                    self.alerts.warn(format!("Linked document is not bundled: {link}"));
                 }
             }
             Message::CloseTileMenu => self.tile_menu = None,
             Message::Key(_) if self.help.is_some() => {}
             Message::Preferences(message) => self.preferences(message),
+            Message::PatchInfo(message) => self.patch_info_message(message),
+            Message::HistoryKey { redo, typing } => {
+                if !typing {
+                    if redo {
+                        self.redo();
+                    } else {
+                        self.undo();
+                    }
+                }
+            }
+            Message::Licence(message) => self.licence_message(message),
+            Message::Patches(_) | Message::Question(_) => {}
+            Message::OpenRecent => self.open_recent_list(),
+            Message::Recent(message) => self.recent_message(message),
+            Message::FileDropped(path) => self.file_dropped(path),
+            Message::DropsDone => self.drops_done(),
+            Message::Key(iced::keyboard::Event::KeyPressed { key, .. }) if self.chooser.is_some() => {
+                // The chooser takes Escape and keeps other keys from the
+                // canvas and the windows behind it.
+                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
+                    self.chooser = None;
+                }
+            }
+            Message::Key(_) if self.chooser.is_some() || self.patches.is_some() => {}
             Message::Key(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) if self.rig.window.is_some() => {
                 // The window takes Escape and its own shortcut, and keeps
                 // other keys from the canvas behind it.
@@ -1136,6 +1463,12 @@ impl App {
                 }
             }
             Message::Key(_) if self.tile_menu.is_some() => {}
+            Message::Key(iced::keyboard::Event::KeyPressed { key, .. }) if self.recent_rows.is_some() => {
+                if key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
+                    self.recent_rows = None;
+                }
+            }
+            Message::Key(_) if self.recent_rows.is_some() => {}
             Message::ProbeMenu(message) => {
                 if let (Some(menu), probe_menu::Message::Pick(probe)) = (self.probe_menu.take(), message) {
                     self.add_probe(probe, menu.output, menu.world);
@@ -1196,6 +1529,9 @@ impl App {
                     self.close_slider_gesture();
                 }
             }
+            Message::ValueText { module, index, text } => self.type_value_draft(module, index, text),
+            Message::ValueDraftClear => self.clear_value_draft(),
+            Message::TextFocusCheck => {}
             Message::Range { module, index, range } => self.set_range(module, index, range),
             Message::SliderReleased => self.close_slider_gesture(),
             Message::AddModulation { module, index } => {
@@ -1213,7 +1549,7 @@ impl App {
                 self.edits.start_slider_gesture();
                 self.begin_edit();
                 if let Err(e) = self.controller.set_assignment_depth(id, depth) {
-                    self.alerts.say(format!("error: {e}"));
+                    self.alerts.warn(e.to_string());
                 }
                 self.refresh_values();
             }
@@ -1221,7 +1557,7 @@ impl App {
                 self.close_slider_gesture();
                 self.edit(|app| {
                     if let Err(e) = app.controller.set_assignment_polarity(id, choice.polarity()) {
-                        app.alerts.say(format!("error: {e}"));
+                        app.alerts.warn(e.to_string());
                     }
                     app.refresh_values();
                 });
@@ -1230,7 +1566,7 @@ impl App {
                 self.close_slider_gesture();
                 self.edit(|app| {
                     if let Err(e) = app.controller.set_assignment_enabled(id, enabled) {
-                        app.alerts.say(format!("error: {e}"));
+                        app.alerts.warn(e.to_string());
                     } else {
                         app.scene.set_modulation_enabled(id.0, enabled);
                     }
@@ -1249,7 +1585,7 @@ impl App {
                             modulation::target_name(graph, removed.target, removed.param)
                         ));
                     }
-                    Err(e) => app.alerts.say(format!("error: {e}")),
+                    Err(e) => app.alerts.warn(e.to_string()),
                 });
             }
             Message::SelectModule(id) => {
@@ -1261,6 +1597,7 @@ impl App {
             Message::Redo => self.redo(),
             Message::OpenBrowser => self.browser_key += 1,
             Message::Panic => self.panic(),
+            Message::DismissError(cause) => self.alerts.dismiss(cause),
             Message::MidiPoll => self.poll_midi(),
             Message::HoldNote => {
                 if let Some(midi) = &self.midi {
@@ -1321,9 +1658,12 @@ impl App {
                 at,
                 peak,
                 max,
+                silenced,
+                clipped,
             }) => {
                 self.stream.set_load(peak, max);
                 self.alerts.note_dropouts(dropouts, at);
+                self.alerts.set_output_warnings(silenced, clipped);
             }
             Message::Audio(audio_watch::Event::Stalled { callbacks, advanced }) => {
                 // Time the stall from when the watcher last saw a callback,
@@ -1371,7 +1711,7 @@ impl App {
                         ));
                     }
                     Ok(None) => {}
-                    Err(e) => app.alerts.say(format!("error: {e}")),
+                    Err(e) => app.alerts.warn(e.to_string()),
                 });
             }
             Message::Midi => {
@@ -1396,10 +1736,12 @@ impl App {
                 // Ctrl+Z or Cmd+Z undoes; adding Shift redoes. Ctrl+Y also
                 // redoes, except on macOS.
                 match key.as_ref() {
+                    // Undo and redo wait for a focus check: a text field
+                    // being edited keeps them (undo.md, Gestures).
                     iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("z") && modifiers.shift() => {
-                        self.redo()
+                        self.history_key = Some(true)
                     }
-                    iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("z") => self.undo(),
+                    iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("z") => self.history_key = Some(false),
                     iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("n") => {
                         self.file_action(FileAction::New)
                     }
@@ -1413,7 +1755,7 @@ impl App {
                         self.file_action(FileAction::Save);
                     }
                     iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("y") && !cfg!(target_os = "macos") => {
-                        self.redo()
+                        self.history_key = Some(true)
                     }
                     iced::keyboard::Key::Character(",") => self.toggle_preferences(),
                     _ => {}
@@ -1431,13 +1773,13 @@ impl App {
         let Some((transport, index)) = transport_run(&self.controller) else {
             let running = !self.controller.transport().running;
             if let Err(e) = self.controller.set_running(running) {
-                self.alerts.say(format!("error: {e}"));
+                self.alerts.warn(e.to_string());
             }
             return;
         };
         if run_is_driven(&self.controller) {
             self.alerts
-                .say("Run follows the cable on the Transport's run input".to_string());
+                .warn("Run follows the cable on the Transport's run input".to_string());
             return;
         }
         let on = self

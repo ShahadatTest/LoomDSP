@@ -2,6 +2,51 @@
 
 use super::*;
 
+/// True for a command that works through what an open question blocks. It is
+/// refused with an error, because its reply would otherwise say it worked
+/// when nothing happened (rule 9).
+///
+/// No wildcard, on purpose: a new command must choose a side. `new`, `open`,
+/// and `save` act directly, and a pointer goes through the view, where the
+/// question's scrim takes it as it would a real pointer.
+fn blocked_by_question(command: &Command) -> bool {
+    match command {
+        Command::Select { .. }
+        | Command::Set { .. }
+        | Command::Add { .. }
+        | Command::Remove { .. }
+        | Command::Connect { .. }
+        | Command::Disconnect { .. }
+        | Command::Probe { .. }
+        | Command::Undo
+        | Command::Redo
+        | Command::Arm { .. }
+        | Command::Type { .. }
+        | Command::OutputSafety { .. }
+        | Command::Audio { .. }
+        | Command::Midi { .. } => true,
+        Command::Snapshot
+        | Command::Panic
+        | Command::Open { .. }
+        | Command::Save { .. }
+        | Command::Note { .. }
+        | Command::Cc { .. }
+        | Command::Key { .. }
+        | Command::Toolbar { .. }
+        | Command::Press { .. }
+        | Command::Release { .. }
+        | Command::Hover { .. }
+        | Command::Drag { .. }
+        | Command::Scroll { .. }
+        | Command::Locate { .. }
+        | Command::Screenshot { .. }
+        | Command::Sample { .. }
+        | Command::Wait { .. }
+        | Command::Quit
+        | Command::New => false,
+    }
+}
+
 /// Searches the live window for a target, then does `then` with what it
 /// found.
 pub(super) fn search(call: Call, target: String, then: AfterSearch) -> Task<Message> {
@@ -174,6 +219,15 @@ impl App {
                     call.answer(answer);
                 }
                 Step::Locate(target) => tasks.push(search(call, target, AfterSearch::Locate)),
+                Step::Type(text) => {
+                    tasks.push(
+                        crate::editing::text_field_focused().map(move |focused| Message::TypeFocus {
+                            call: call.clone(),
+                            text: text.clone(),
+                            focused,
+                        }),
+                    )
+                }
                 Step::Screenshot(path, Area::Target { target, margin }) => {
                     tasks.push(search(call, target, AfterSearch::Screenshot { path, margin }));
                 }
@@ -193,6 +247,11 @@ impl App {
     /// What to answer, now or after drawing, and the tasks the UI messages
     /// returned.
     pub(super) fn run_command(&mut self, call: &Call) -> (Then, Task<Message>) {
+        if let Some(question) = &self.question
+            && blocked_by_question(&call.command)
+        {
+            return (Then::Now(Err(question_open_error(question))), Task::none());
+        }
         let mut tasks = Vec::new();
         let mut send = |app: &mut App, message: Message| tasks.push(app.update(message));
         let answer = match call.command.clone() {
@@ -243,7 +302,7 @@ impl App {
             }
             Command::Open { path, .. } => {
                 if self.replace(crate::Source::File(&path)) {
-                    self.alerts.say(format!("opened {}", path.display()));
+                    self.say_opened(&path);
                     Ok(Map::new())
                 } else {
                     Err(self.alerts.status().to_string())
@@ -298,6 +357,7 @@ impl App {
                 let then = match key(&name)
                     .and_then(|k| Ok((k, modifiers(&names)?)))
                     .and_then(|(k, m)| refuse_dialog_keys(&k, m).map(|()| (k, m)))
+                    .and_then(|(k, m)| refuse_while_asking(self.question.as_ref(), &k, m).map(|()| (k, m)))
                 {
                     Ok((k, m)) => {
                         let steps = key_events(k, m).into_iter().map(PointerStep::Key).collect();
@@ -307,9 +367,26 @@ impl App {
                 };
                 return (then, Task::batch(tasks));
             }
-            Command::Toolbar { button } => press_message(self, &button).map(|message| {
-                send(self, message);
-                Map::new()
+            Command::Type { text } => {
+                let then = match type_events(&text) {
+                    Ok(_) => Then::AfterDraw(Step::Type(text)),
+                    Err(error) => Then::Now(Err(error)),
+                };
+                return (then, Task::batch(tasks));
+            }
+            Command::Toolbar { button } => press_message(self, &button).and_then(|message| {
+                // An answer that wrote nothing is an error, because the step
+                // after it was dropped too (rule 9). `update` cannot say so,
+                // and a field would not survive the patch being replaced.
+                if let Message::Question(answer) = message {
+                    self.document.may_have_changed();
+                    if !self.question_message(answer) {
+                        return Err(self.alerts.status().to_string());
+                    }
+                } else {
+                    send(self, message);
+                }
+                Ok(Map::new())
             }),
             Command::Press {
                 button,
@@ -551,10 +628,14 @@ impl App {
     /// counts the ones the next `advanced` compares with, as a `snapshot`
     /// does.
     pub(super) fn audio_health(&mut self, remember: bool) -> Value {
+        let wanted = self.input_wanted();
+        let denied = wanted && self.rig.host.audio_input_permission_denied();
+        let input = self.rig.input.stream_report(wanted, denied);
         let Some(stats) = self.stream.stats().cloned() else {
             return json!({
                 "device": null, "rate": null, "buffer": null, "callbacks": 0,
                 "advanced": null, "stream_errors": 0, "start_overloads": 0, "overruns": 0,
+                "input": input,
             });
         };
         let now = stats.snapshot();
@@ -576,6 +657,7 @@ impl App {
             "stream_errors": now.stream_errors,
             "start_overloads": now.start_overloads,
             "overruns": now.overruns,
+            "input": input,
         })
     }
 
@@ -750,6 +832,29 @@ impl App {
             Ok(Map::new())
         } else {
             Err("the MIDI queue is full".to_string())
+        }
+    }
+
+    /// Types the text of a `type` command, now that the window has said
+    /// whether a text field has focus. With none, no key is sent: a letter
+    /// would reach the app's shortcuts.
+    pub(crate) fn type_after_focus_check(&mut self, call: Call, text: &str, focused: bool) {
+        if !focused {
+            call.answer(Err(
+                "no text field has focus, so nothing was typed; open or click one first".to_string(),
+            ));
+            return;
+        }
+        match type_events(text) {
+            Ok(events) => {
+                let steps = events.into_iter().map(PointerStep::Key).collect();
+                self.control_pending.push(Pending {
+                    frames: FRAMES_BEFORE_ANSWER,
+                    call,
+                    step: Step::Pointer(self.pointer.push(steps), false),
+                });
+            }
+            Err(error) => call.answer(Err(error)),
         }
     }
 

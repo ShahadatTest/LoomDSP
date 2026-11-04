@@ -6,12 +6,13 @@ use crate::matrix::{Event as MatrixEvent, Tab as RightTab};
 use crate::style::button;
 use crate::subscriptions::{browser_key, help_key};
 use crate::{
-    App, DIM, FileAction, Message, alerts, browser, inspector, learn, matrix, panic, pointer, probe_menu, settings,
-    style, undo,
+    App, DIM, FileAction, Message, alerts, browser, inspector, learn, matrix, panic, patches, pointer, probe_menu,
+    question, recent, settings, style, undo,
 };
 use iced::widget::{column, container, mouse_area, row, rule, space, stack, text, toggler, tooltip};
 use iced::{Color, Element, Length};
 use loom_canvas::{DragLine, PatchCanvas};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 impl App {
@@ -28,10 +29,17 @@ impl App {
                     && self.probe_menu.is_none()
                     && self.tile_menu.is_none()
                     && self.help.is_none()
-                    && self.rig.window.is_none(),
+                    && self.rig.window.is_none()
+                    && self.chooser.is_none()
+                    && self.patches.is_none()
+                    && self.question.is_none()
+                    && self.recent_rows.is_none(),
             )
             .matrix_line(self.matrix_line())
             .matrix_keyboard(self.matrix.tab == RightTab::Matrix && self.matrix.focused)
+            .text_field_keys(self.text_focus.any)
+            .text_field_keeps_tab(self.tab_moves_between_fields())
+            .typed_check(|module, widget, text| self.typed_check(module, widget, text))
             .matrix_escape(
                 self.matrix.tab == RightTab::Matrix
                     && self.matrix.focused
@@ -89,19 +97,55 @@ impl App {
                 .push(outside)
                 .push(iced::widget::pin(iced::widget::opaque(menu)).position(at));
         }
+        if let Some(rows) = &self.recent_rows {
+            let outside = mouse_area(space::horizontal().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::Recent(recent::Message::Close))
+                .on_right_press(Message::Recent(recent::Message::Close));
+            layers = layers.push(outside).push(
+                iced::widget::pin(iced::widget::opaque(recent::view(rows).map(Message::Recent)))
+                    .position(recent::LIST_AT),
+            );
+        }
         if let Some(help) = &self.help {
             layers = layers.push(iced::widget::opaque(help.view(self.theme())));
         }
         if let Some(window) = self.preferences_view() {
             layers = layers.push(window);
         }
+        if let Some(open) = &self.patches {
+            layers = layers.push(open.view().map(Message::Patches));
+        }
+        // Over the Preferences window, which also opens it.
+        if let Some(chooser) = &self.chooser {
+            layers = layers.push(chooser.view());
+        }
+        // Over everything: a question must be answered first.
+        if let Some(question) = &self.question {
+            layers = layers.push(question.view().map(Message::Question));
+        }
         // The control channel's pointer events go in here, as a real
         // pointer's would (control-channel.md, Pointer commands).
         let browser_open = self.browser.is_some() && self.help.is_none();
+        let patches_open = self.patches.is_some() && self.chooser.is_none();
         let matrix_keys = self.matrix.tab == RightTab::Matrix && self.matrix.focused;
-        pointer::Injector::new(layers, self, move |key, status| {
-            // As the subscriptions do: `keyboard::listen` passes on what no
-            // widget took, and the open browser hears every key.
+        let value_draft = self.value_draft.is_some();
+        let question_open = self.question.is_some();
+        let on_key = move |key: iced::keyboard::Event, status| {
+            // As the subscriptions do: an open question has the keys, except
+            // Panic's. One key must not answer it and also reach what is
+            // behind it, once the answer has closed it.
+            if question_open {
+                let event = iced::Event::Keyboard(key);
+                return [
+                    question::key(event.clone(), status, iced::window::Id::unique()),
+                    panic::key(event, status, iced::window::Id::unique()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+            }
+            // `keyboard::listen` passes on what no widget took, and the open
+            // browser hears every key.
             let mut messages = Vec::new();
             if status == iced::event::Status::Ignored {
                 messages.push(Message::Key(key.clone()));
@@ -115,14 +159,30 @@ impl App {
             if let Some(message) = help_key(iced::Event::Keyboard(key.clone()), status, iced::window::Id::unique()) {
                 messages.push(message);
             }
+            let event = iced::Event::Keyboard(key.clone());
+            if value_draft
+                && let Some(message) =
+                    crate::controls::value_draft_event(event.clone(), status, iced::window::Id::unique())
+            {
+                messages.push(message);
+            }
+            if let Some(message) = crate::controls::text_focus_event(event, status, iced::window::Id::unique()) {
+                messages.push(message);
+            }
+            if patches_open
+                && let Some(message) =
+                    patches::key(iced::Event::Keyboard(key.clone()), status, iced::window::Id::unique())
+            {
+                messages.push(message);
+            }
             if browser_open
                 && let Some(message) = browser_key(iced::Event::Keyboard(key), status, iced::window::Id::unique())
             {
                 messages.push(message);
             }
             messages
-        })
-        .into()
+        };
+        pointer::Injector::new(layers, self, on_key, || Message::TextFocusCheck).into()
     }
 
     /// The toolbar: the patch name, then buttons in groups (file, add,
@@ -145,14 +205,33 @@ impl App {
             button(label("Open")).on_press(Message::File(FileAction::Open)),
             button(label("Save")).on_press(Message::File(FileAction::Save)),
             button(label("Save As")).on_press(Message::File(FileAction::SaveAs)),
+            tip(
+                button(label("Browse")).on_press(Message::File(FileAction::Browse)),
+                if cfg!(target_os = "macos") {
+                    "Your patches: Cmd+Shift+O"
+                } else {
+                    "Your patches: Ctrl+Shift+O"
+                },
+            ),
+            tip(
+                button(label("Recent"))
+                    .on_press_maybe((!self.rig.recent.files().is_empty()).then_some(Message::OpenRecent)),
+                self.recent_hover(),
+            ),
         ];
         let add = tip(
             button(label("Add module")).on_press(Message::OpenBrowser),
             "Or press A over the canvas, or double-click empty canvas",
         );
+        let hold = button(label(if self.holding { "Release note" } else { "Hold note" }))
+            .on_press_maybe(self.midi.as_ref().map(|_| Message::HoldNote));
+        // Disabled controls say why (visual-system.md, Status messages).
+        let hold: Element<'static, Message> = match self.hold_hover() {
+            Some(reason) => tip(hold, reason),
+            None => hold.into(),
+        };
         let play = row![
-            button(label(if self.holding { "Release note" } else { "Hold note" }))
-                .on_press_maybe(self.midi.as_ref().map(|_| Message::HoldNote)),
+            hold,
             tip(
                 button(label("Panic")).on_press(Message::Panic).style(style::danger),
                 if cfg!(target_os = "macos") {
@@ -201,6 +280,20 @@ impl App {
         .into()
     }
 
+    /// Hold note's hover text: why it is disabled, if it is.
+    pub(crate) fn hold_hover(&self) -> Option<&'static str> {
+        self.midi.is_none().then_some(HOLD_DISABLED)
+    }
+
+    /// Recent's hover text, which says why while it is disabled.
+    pub(crate) fn recent_hover(&self) -> &'static str {
+        if self.rig.recent.files().is_empty() {
+            RECENT_DISABLED
+        } else {
+            "The last patches you opened or saved"
+        }
+    }
+
     /// An Undo or Redo button. It is disabled with nothing to do, and its
     /// hover text names the step.
     pub(crate) fn history_button<'a>(
@@ -227,6 +320,7 @@ impl App {
     pub(crate) fn inspector(&self) -> Element<'_, Message> {
         inspector::view(
             self.inspector_model(),
+            &self.patch_info.authors,
             self.gestures.drop_row(),
             self.gestures.assign_drag().is_some() && !self.learn.is_on(),
         )
@@ -277,6 +371,27 @@ impl App {
                         .color(severity_colour(alerts::Severity::Warning)),
                 );
             }
+            let engine = self.controller.stats();
+            if stats.output_silenced {
+                items = items.push(output_warning(
+                    "Output: bad samples silenced",
+                    alerts::Severity::Alarm,
+                    format!(
+                        "{} samples since the engine started",
+                        engine.output_silenced.load(Ordering::Relaxed)
+                    ),
+                ));
+            }
+            if stats.output_clipped {
+                items = items.push(output_warning(
+                    "Output clipped",
+                    alerts::Severity::Warning,
+                    format!(
+                        "{} samples since the engine started",
+                        engine.output_clipped.load(Ordering::Relaxed)
+                    ),
+                ));
+            }
             if stats.telemetry_dropped > 0 {
                 items = items.push(bar_text(format!("telemetry dropped {}", stats.telemetry_dropped)).color(DIM));
             }
@@ -301,6 +416,9 @@ impl App {
             )
             .into(),
         };
+        // A word, so it reads without colour, and it stays whatever the
+        // status says: in learn mode screen controls do not change values.
+        let learning = self.learn.is_on().then(|| bar_text("Learning"));
         let mut bar = row![].spacing(16).align_y(iced::Alignment::Center);
         if self.dev_tools {
             bar = bar
@@ -327,35 +445,91 @@ impl App {
         )))
         .push(audio)
         .push(midi)
-        // The status takes the remaining width and is cut off rather
-        // than wrapped, so the bar stays one line high. Hover shows all
-        // of it.
-        .push(tooltip(
-            container(bar_text(self.alerts.status()).color(DIM))
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .clip(true),
-            container(text(self.alerts.status()).size(style::BODY))
-                .padding(6)
-                .max_width(480)
-                .style(container::rounded_box),
-            tooltip::Position::Top,
+        .extend(learning.map(Element::from))
+        // The fixed items come first. The kept error and the status share
+        // the remaining width, and are cut off rather than wrapped, so the
+        // bar stays one line high. Hover shows all of it.
+        .extend(self.alerts.kept_field().map(|kept| {
+            status_field(
+                alerts::labelled(alerts::Severity::Alarm, &kept.text),
+                self.alerts.kept_hover(),
+                alerts::Severity::Alarm,
+                kept.dismissible.then_some(kept.cause),
+            )
+        }))
+        .push(status_field(
+            alerts::labelled(self.alerts.severity(), self.alerts.status()),
+            if self.alerts.severity() == alerts::Severity::Alarm {
+                self.alerts.kept_hover()
+            } else {
+                alerts::labelled(self.alerts.severity(), self.alerts.status())
+            },
+            self.alerts.severity(),
+            self.alerts
+                .newest_kept()
+                .filter(|kept| kept.dismissible && self.alerts.kept_field().is_none())
+                .map(|kept| kept.cause),
         ))
         .padding([4, 10])
         .into()
     }
 }
 
+/// Hold note's hover text while it is disabled. The control channel refuses
+/// the press with the same words.
+pub(crate) const HOLD_DISABLED: &str = "Hold note is disabled: no audio is playing the engine";
+
+/// Recent's hover text while it is disabled.
+const RECENT_DISABLED: &str = "Recent is disabled: no patches opened or saved yet";
+
+/// A stats bar warning about the output, with its counts in hover text.
+fn output_warning<'a>(label: &'a str, severity: alerts::Severity, hover: String) -> Element<'a, Message> {
+    tooltip(
+        bar_text(label).color(severity_colour(severity)),
+        container(text(hover).size(style::BODY))
+            .padding(6)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
+/// One message in the status bar: cut to its share of the width, all of it in
+/// hover text, with a × if the player may dismiss it.
+fn status_field<'a>(
+    shown: String,
+    hover: String,
+    severity: alerts::Severity,
+    dismiss: Option<alerts::Cause>,
+) -> Element<'a, Message> {
+    row![tooltip(
+        container(bar_text(shown).color(severity_colour(severity)))
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End)
+            .clip(true),
+        container(text(hover).size(style::BODY))
+            .padding(6)
+            .max_width(480)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    )]
+    .extend(dismiss.map(|cause| remove_button("Dismiss this error", Message::DismissError(cause))))
+    .width(Length::Fill)
+    .spacing(4)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 /// The inspector's remove button for an item in a list, such as a MIDI
 /// mapping or a modulation assignment: a small × at the end of its row,
 /// with hover text that names what it removes (panels.md, The inspector).
-pub(crate) fn remove_button<'a>(what: &'a str, on_press: Message) -> Element<'a, Message> {
+pub(crate) fn remove_button<'a>(what: impl Into<String>, on_press: Message) -> Element<'a, Message> {
     tooltip(
         button(text("×").size(style::CONTROL))
             .padding([0, 6])
             .style(style::plain)
             .on_press(on_press),
-        container(text(what).size(style::BODY))
+        container(text(what.into()).size(style::BODY))
             .padding(6)
             .style(container::rounded_box),
         tooltip::Position::Top,
@@ -372,7 +546,7 @@ pub(crate) fn bar_text<'a>(content: impl text::IntoFragment<'a>) -> iced::widget
 pub(crate) fn severity_colour(severity: alerts::Severity) -> Color {
     match severity {
         alerts::Severity::Normal => DIM,
-        alerts::Severity::Warning => Color::from_rgb8(0xF5, 0xA6, 0x23),
-        alerts::Severity::Alarm => Color::from_rgb8(0xEB, 0x6B, 0x6B),
+        alerts::Severity::Warning => style::WARNING_TEXT,
+        alerts::Severity::Alarm => style::ERROR_TEXT,
     }
 }

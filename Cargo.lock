@@ -223,9 +223,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -1928,6 +1928,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "known-folders"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a1886916523694cd6ea3d175f03a1e5010699a2a4cc13696d83d7bea1d80638"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2049,6 +2058,7 @@ dependencies = [
  "iced_runtime",
  "iced_wgpu",
  "jiff",
+ "known-folders",
  "libc",
  "loom-analysis",
  "loom-canvas",
@@ -2094,9 +2104,17 @@ name = "loom-core"
 version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
+ "loom-dsp",
  "loom-rt",
  "rtrb",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "loom-dsp"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
 ]
 
 [[package]]
@@ -2125,6 +2143,7 @@ dependencies = [
  "criterion",
  "loom-analysis",
  "loom-core",
+ "loom-dsp",
  "loom-modules",
  "loom-patch",
  "loom-rt",
@@ -2139,6 +2158,7 @@ dependencies = [
  "loom-modules",
  "ron",
  "serde",
+ "spdx",
  "thiserror 2.0.21",
 ]
 
@@ -3472,6 +3492,15 @@ dependencies = [
  "web-sys",
  "windows-sys 0.61.2",
  "x11rb",
+]
+
+[[package]]
+name = "spdx"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "646c5a367da914e3babcb9cd8e91c37ccaac42325b8f86f036513ad103f2a716"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]

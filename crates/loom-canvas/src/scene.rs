@@ -148,6 +148,18 @@ pub enum WidgetViewKind {
         /// Option labels.
         options: Vec<String>,
     },
+    /// A straight track with a handle (panel-widgets.md, Fader).
+    Fader {
+        /// True for a vertical track, false for a horizontal one.
+        vertical: bool,
+        /// Whole-number values to step through, or 0, as for a knob.
+        steps: u32,
+    },
+    /// A value shown as text in a box (panel-widgets.md, Number).
+    Number {
+        /// Whole-number values to step through, or 0, as for a knob.
+        steps: u32,
+    },
     /// Compact choice box with a pop-up list.
     Select {
         /// Option labels.
@@ -163,8 +175,18 @@ pub enum WidgetViewKind {
     },
     /// A brightness.
     Light,
-    /// A level meter: an RMS bar and a peak line.
-    Meter,
+    /// A display value as text, in a box (panel-widgets.md, Readout).
+    Readout {
+        /// Width in panel grid units.
+        width: u8,
+    },
+    /// A level meter: an RMS bar and a peak line. The bar starts from `zero`,
+    /// from 0 at the bottom to 1 at the top. Above 0, the meter shows a display
+    /// value that runs below 0, such as gain reduction, with no peak line.
+    Meter {
+        /// Where the bar starts.
+        zero: f32,
+    },
     /// A scope: a frame, and the trace the app sets in
     /// [`crate::ScopeTraces`].
     Scope,
@@ -175,6 +197,14 @@ pub enum WidgetViewKind {
     },
     /// A large button. Its gesture depends on the mode stored with its value.
     Button,
+}
+
+impl WidgetViewKind {
+    /// True for a one-number control: a knob, a fader, or a number box. Code
+    /// that treats them alike asks this, not a list.
+    pub fn is_one_number(&self) -> bool {
+        matches!(self, Self::Knob { .. } | Self::Fader { .. } | Self::Number { .. })
+    }
 }
 
 /// One widget on a panel, placed in grid units from the panel's corner.
@@ -202,7 +232,11 @@ impl WidgetView {
     pub fn size(&self) -> (u8, u8) {
         match &self.kind {
             WidgetViewKind::Knob { .. } => (3, 3),
-            WidgetViewKind::Meter => (3, 6),
+            WidgetViewKind::Fader { vertical: true, .. } => (2, 6),
+            WidgetViewKind::Fader { vertical: false, .. } => (6, 2),
+            WidgetViewKind::Number { .. } => (5, 2),
+            WidgetViewKind::Readout { width } => (*width, 2),
+            WidgetViewKind::Meter { .. } => (3, 6),
             WidgetViewKind::Scope => (9, 5),
             WidgetViewKind::Shape { width } => (*width, 5),
             WidgetViewKind::Toggle | WidgetViewKind::Light => (3, 2),
@@ -218,8 +252,23 @@ impl WidgetView {
     pub fn is_control(&self) -> bool {
         !matches!(
             self.kind,
-            WidgetViewKind::Light | WidgetViewKind::Meter | WidgetViewKind::Scope | WidgetViewKind::Shape { .. }
+            WidgetViewKind::Light
+                | WidgetViewKind::Readout { .. }
+                | WidgetViewKind::Meter { .. }
+                | WidgetViewKind::Scope
+                | WidgetViewKind::Shape { .. }
         )
+    }
+
+    /// The whole-number steps of a one-number control (panel-widgets.md, One
+    /// number), or `None` for any other widget. 0 means a smooth value.
+    pub fn number_steps(&self) -> Option<u32> {
+        match self.kind {
+            WidgetViewKind::Knob { steps } | WidgetViewKind::Fader { steps, .. } | WidgetViewKind::Number { steps } => {
+                Some(steps)
+            }
+            _ => None,
+        }
     }
 
     /// True for controls that take a dropped output as a modulation
@@ -229,6 +278,8 @@ impl WidgetView {
         matches!(
             self.kind,
             WidgetViewKind::Knob { .. }
+                | WidgetViewKind::Fader { .. }
+                | WidgetViewKind::Number { .. }
                 | WidgetViewKind::Toggle
                 | WidgetViewKind::Radio { .. }
                 | WidgetViewKind::Select { .. }
@@ -295,7 +346,7 @@ impl ModuleView {
         self.panel
             .widgets
             .iter()
-            .any(|w| matches!(w.kind, WidgetViewKind::Scope | WidgetViewKind::Meter))
+            .any(|w| matches!(w.kind, WidgetViewKind::Scope | WidgetViewKind::Meter { .. }))
     }
 
     /// The panel's minimum tile size in world units.
@@ -361,18 +412,52 @@ impl ModuleView {
         let widget = self.panel.widgets.get(index).filter(|w| !w.hidden)?;
         let origin = self.panel_origin();
         let (w, h) = widget.size();
-        let extra = if matches!(widget.kind, WidgetViewKind::Scope | WidgetViewKind::Meter) {
-            self.size() - self.minimum_size()
-        } else {
-            iced::Size::ZERO
+        let extra = match widget.kind {
+            WidgetViewKind::Scope => self.size() - self.minimum_size(),
+            WidgetViewKind::Meter { .. } => self.meter_growth(widget),
+            _ => iced::Size::ZERO,
         };
         Some(Rectangle::new(
             Point::new(
                 origin.x + f32::from(widget.x) * GRID,
-                origin.y + f32::from(widget.y) * GRID,
+                origin.y + f32::from(widget.y) * GRID + self.scope_push(widget),
             ),
             iced::Size::new(f32::from(w) * GRID + extra.width, f32::from(h) * GRID + extra.height),
         ))
+    }
+
+    /// How far a growing scope above `widget` moves it down, so the scope does
+    /// not cover it (`docs/design/panels.md`, Resizable tiles).
+    fn scope_push(&self, widget: &WidgetView) -> f32 {
+        let below_a_scope = self
+            .panel
+            .widgets
+            .iter()
+            .any(|w| matches!(w.kind, WidgetViewKind::Scope) && widget.y >= w.y + w.size().1);
+        if below_a_scope {
+            (self.size() - self.minimum_size()).height
+        } else {
+            0.0
+        }
+    }
+
+    /// The tile's extra size that `meter` can take without covering another
+    /// widget. A hidden widget counts, so a meter does not jump when a setting
+    /// shows or hides one (`docs/design/panels.md`, Resizable tiles).
+    fn meter_growth(&self, meter: &WidgetView) -> iced::Size {
+        let extra = self.size() - self.minimum_size();
+        let (width, height) = meter.size();
+        let (right, bottom) = (meter.x + width, meter.y + height);
+        let others = || self.panel.widgets.iter().map(|other| (other, other.size()));
+        let below = others().any(|(o, (w, _))| o.y >= bottom && o.x < right && o.x + w > meter.x);
+        let beside = others().any(|(o, (_, h))| o.x >= right && o.y < bottom && o.y + h > meter.y);
+        // Growing both ways would reach a widget past the corner. A meter's
+        // bar is tall, so it keeps its height and gives up the width.
+        let past_corner = !below && others().any(|(o, _)| o.x >= right && o.y >= bottom);
+        iced::Size::new(
+            if beside || past_corner { 0.0 } else { extra.width },
+            if below { 0.0 } else { extra.height },
+        )
     }
 
     /// Width available for a port label, in world units: half the tile
